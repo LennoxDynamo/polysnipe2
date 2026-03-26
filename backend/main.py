@@ -1,5 +1,5 @@
 """
-main.py — PolySnipe Backend v2
+main.py — PolySnipe Backend v2.1
 Run locally:  uvicorn main:app --reload --port 8000
 Deploy:       Procfile / Railway auto-detects uvicorn
 """
@@ -9,9 +9,10 @@ import csv
 import io
 import json
 import logging
+import time
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,27 +27,21 @@ from simulator import run_simulation, run_comparison
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── App ──────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title       = "PolySnipe API v2",
-    description = "BTC 5-min Polymarket simulator backend",
-    version     = "2.0.0",
-)
+app = FastAPI(title="PolySnipe API v2.1", version="2.1.0")
 
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins  = ["*"],
-    allow_methods  = ["*"],
-    allow_headers  = ["*"],
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
-# Serve frontend
 import pathlib
 FRONTEND_DIR = pathlib.Path(__file__).parent.parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/app", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
 
+# ── In-memory stores ─────────────────────────────────────────────
+_notes:       dict[str, list[dict]] = {}   # market_id → [{tick,text,ts}]
+_price_cache: dict[str, dict]       = {}   # market_id → {up,dn,ts,token_ids,question}
+_ws_clients:  set[WebSocket]        = set()
 
 # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -54,7 +49,8 @@ if FRONTEND_DIR.exists():
 async def startup():
     strategy_loader.load_all()
     asyncio.create_task(btc_feed.start())
-    logger.info("PolySnipe backend started")
+    asyncio.create_task(_price_poll_loop())
+    logger.info("PolySnipe backend v2.1 started")
 
 
 @app.on_event("shutdown")
@@ -62,37 +58,150 @@ async def shutdown():
     await btc_feed.stop()
 
 
-# ── Request / Response models ────────────────────────────────────
+# ── Background price polling → push to WebSocket clients ─────────
+
+async def _price_poll_loop():
+    while True:
+        await asyncio.sleep(5)
+        try:
+            if not _price_cache:
+                continue
+
+            token_map: dict[str, str] = {}
+            market_tokens: dict[str, list] = {}
+            for mid, cached in _price_cache.items():
+                tids = cached.get("token_ids", [])
+                market_tokens[mid] = tids
+                for tid in tids:
+                    token_map[tid] = mid
+
+            all_tokens = list(token_map.keys())
+            if not all_tokens:
+                continue
+
+            live = await md.get_live_prices(all_tokens)
+            updates = []
+            for mid, tids in market_tokens.items():
+                if tids and tids[0] in live:
+                    up_p = round(live[tids[0]], 4)
+                    dn_p = round(live.get(tids[1], 1 - up_p), 4) if len(tids) > 1 else round(1 - up_p, 4)
+                    _price_cache[mid].update({"up": up_p, "dn": dn_p, "ts": time.time()})
+                    updates.append({
+                        "type": "price", "market_id": mid,
+                        "up_price": up_p, "down_price": dn_p, "ts": time.time(),
+                    })
+
+            if updates and _ws_clients:
+                payload = json.dumps({"prices": updates, "btc": BtcState.snapshot()})
+                dead = set()
+                for ws in _ws_clients:
+                    try:
+                        await ws.send_text(payload)
+                    except Exception:
+                        dead.add(ws)
+                _ws_clients -= dead
+
+        except Exception as e:
+            logger.debug(f"price poll: {e}")
+
+
+# ── Request models ────────────────────────────────────────────────
 
 class SimulateRequest(BaseModel):
-    market_ids:       list[str]       = Field(..., min_length=1)
-    strategy_id:      str             = Field("mean_reversion")
-    strategy_params:  dict            = Field(default_factory=dict)
-    initial_capital:  float           = Field(10.0,  ge=1.0,   le=10000.0)
-    stake_per_trade:  float           = Field(1.0,   ge=0.1,   le=500.0)
-    max_open:         int             = Field(2,      ge=1,     le=10)
-    enable_slippage:  bool            = Field(True)
-    market_impact:    float           = Field(0.002, ge=0.0,   le=0.05)
-
+    market_ids:      list[str] = Field(..., min_length=1)
+    strategy_id:     str       = Field("mean_reversion")
+    strategy_params: dict      = Field(default_factory=dict)
+    initial_capital: float     = Field(10.0,  ge=1.0,   le=10000.0)
+    stake_per_trade: float     = Field(1.0,   ge=0.1,   le=500.0)
+    max_open:        int       = Field(2,      ge=1,     le=10)
+    enable_slippage: bool      = Field(True)
+    market_impact:   float     = Field(0.002, ge=0.0,   le=0.05)
 
 class CompareRequest(BaseModel):
-    market_ids:      list[str]         = Field(..., min_length=1)
-    strategy_ids:    list[str]         = Field(..., min_length=1)
-    strategy_params: dict[str, dict]   = Field(default_factory=dict)
-    initial_capital: float             = Field(10.0, ge=1.0, le=10000.0)
-    stake_per_trade: float             = Field(1.0,  ge=0.1, le=500.0)
-    max_open:        int               = Field(2,    ge=1,   le=10)
+    market_ids:      list[str]       = Field(..., min_length=1)
+    strategy_ids:    list[str]       = Field(..., min_length=1)
+    strategy_params: dict[str, dict] = Field(default_factory=dict)
+    initial_capital: float           = Field(10.0, ge=1.0, le=10000.0)
+    stake_per_trade: float           = Field(1.0,  ge=0.1, le=500.0)
+    max_open:        int             = Field(2,    ge=1,   le=10)
 
+class NoteRequest(BaseModel):
+    tick: int = Field(..., ge=0, le=300)
+    text: str = Field(..., min_length=1, max_length=200)
 
-# ── Health ───────────────────────────────────────────────────────
+# ── Health ────────────────────────────────────────────────────────
 
 @app.get("/api/health")
 async def health():
-    btc = BtcState.snapshot()
     return {
-        "status":     "ok",
+        "status": "ok", "version": "2.1.0",
         "strategies": strategy_loader.ids(),
-        "btc":        btc,
+        "btc": BtcState.snapshot(),
+        "tracked_markets": len(_price_cache),
+    }
+
+
+# ── WebSocket ────────────────────────────────────────────────────
+
+@app.websocket("/ws/prices")
+async def ws_prices(ws: WebSocket):
+    await ws.accept()
+    _ws_clients.add(ws)
+    logger.info(f"WS client connected ({len(_ws_clients)} total)")
+    try:
+        # Immediate snapshot
+        snapshot = {
+            "prices": [
+                {"type": "price", "market_id": mid,
+                 "up_price": v["up"], "down_price": v["dn"], "ts": v["ts"]}
+                for mid, v in _price_cache.items()
+            ],
+            "btc": BtcState.snapshot(),
+        }
+        await ws.send_text(json.dumps(snapshot))
+        while True:
+            data = await ws.receive_text()
+            if data == "ping":
+                await ws.send_text(json.dumps({"pong": True, "btc": BtcState.snapshot()}))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _ws_clients.discard(ws)
+
+
+# ── Track markets for live polling ───────────────────────────────
+
+@app.post("/api/track")
+async def track_markets(body: dict):
+    for mid in body.get("market_ids", []):
+        if mid not in _price_cache:
+            market = await md.get_market_by_id(mid)
+            if market:
+                _price_cache[mid] = {
+                    "up": market["up_price"], "dn": market["down_price"],
+                    "ts": time.time(), "token_ids": market.get("token_ids", []),
+                    "question": market["question"],
+                }
+    return {"tracked": list(_price_cache.keys())}
+
+
+@app.delete("/api/track/{market_id}")
+async def untrack_market(market_id: str):
+    _price_cache.pop(market_id, None)
+    return {"ok": True}
+
+
+@app.get("/api/prices")
+async def get_prices_rest(market_ids: str = Query(...)):
+    ids = [x.strip() for x in market_ids.split(",") if x.strip()]
+    return {
+        "prices": {
+            mid: {"up_price": _price_cache[mid]["up"],
+                  "down_price": _price_cache[mid]["dn"],
+                  "ts": _price_cache[mid]["ts"]}
+            for mid in ids if mid in _price_cache
+        },
+        "btc": BtcState.snapshot(),
     }
 
 
@@ -101,7 +210,6 @@ async def health():
 @app.get("/api/strategies")
 async def list_strategies():
     return {"strategies": strategy_loader.list_all()}
-
 
 @app.get("/api/strategies/reload")
 async def reload_strategies():
@@ -116,9 +224,16 @@ async def btc_5min(lookback: int = Query(12, ge=1, le=50)):
     try:
         markets = await md.get_btc_5min_markets(lookback)
         markets = await md.enrich_with_live_prices(markets)
+        for m in markets:
+            if m.get("active") and not m.get("closed") and m["id"] not in _price_cache:
+                _price_cache[m["id"]] = {
+                    "up": m["up_price"], "dn": m["down_price"],
+                    "ts": time.time(), "token_ids": m.get("token_ids", []),
+                    "question": m["question"],
+                }
         return {"markets": markets, "count": len(markets)}
     except Exception as e:
-        logger.error(f"btc5min error: {e}", exc_info=True)
+        logger.error(f"btc5min: {e}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 
@@ -130,7 +245,6 @@ async def search(q: str = Query(..., min_length=1), limit: int = Query(40, ge=1,
             markets = await md.enrich_with_live_prices(markets)
         return {"markets": markets, "count": len(markets), "query": q}
     except Exception as e:
-        logger.error(f"search error: {e}", exc_info=True)
         raise HTTPException(500, detail=str(e))
 
 
@@ -141,12 +255,10 @@ async def get_market(market_id: str):
         raise HTTPException(404, detail=f"Market {market_id} not found")
     ctx = await md.get_full_market_context(market)
     return {
-        "market":         ctx["market"],
-        "order_book_up":  ctx["ob_up"],
-        "order_book_down": ctx["ob_down"],
-        "liquidity_up":   ctx["liquidity_up"],
-        "liquidity_down": ctx["liquidity_down"],
-        "spread":         ctx["spread"],
+        "market": ctx["market"],
+        "order_book_up": ctx["ob_up"], "order_book_down": ctx["ob_down"],
+        "liquidity_up": ctx["liquidity_up"], "liquidity_down": ctx["liquidity_down"],
+        "spread": ctx["spread"],
     }
 
 
@@ -159,94 +271,87 @@ async def price_history(market_id: str, ticks: int = Query(300, ge=60, le=300)):
     return {"market_id": market_id, "ticks": len(history), "history": history}
 
 
-# ── Context ──────────────────────────────────────────────────────
-
 @app.get("/api/context/{market_id}")
 async def market_context(market_id: str):
-    """Full MarketContext snapshot for a given market."""
     market = await md.get_market_by_id(market_id)
     if not market:
         raise HTTPException(404, detail=f"Market {market_id} not found")
     ctx = await md.get_full_market_context(market)
-    btc = BtcState.snapshot()
     return {
-        "market_id":      market_id,
-        "up_price":       ctx["market"]["up_price"],
-        "down_price":     ctx["market"]["down_price"],
-        "liquidity_up":   ctx["liquidity_up"],
-        "liquidity_down": ctx["liquidity_down"],
-        "spread":         ctx["spread"],
-        "btc":            btc,
+        "market_id": market_id,
+        "up_price": ctx["market"]["up_price"], "down_price": ctx["market"]["down_price"],
+        "liquidity_up": ctx["liquidity_up"], "liquidity_down": ctx["liquidity_down"],
+        "spread": ctx["spread"], "btc": BtcState.snapshot(),
     }
 
 
-# ── Signal ───────────────────────────────────────────────────────
-
 @app.get("/api/signal/{market_id}")
 async def signal(
-    market_id:      str,
-    strategy_id:    str   = Query("mean_reversion"),
-    elapsed_sec:    int   = Query(0, ge=0, le=300),
+    market_id:   str,
+    strategy_id: str = Query("mean_reversion"),
+    elapsed_sec: int = Query(0, ge=0, le=300),
 ):
     market = await md.get_market_by_id(market_id)
     if not market:
         raise HTTPException(404, detail=f"Market {market_id} not found")
-
     ctx_data = await md.get_full_market_context(market)
-    btc      = BtcState.snapshot()
-    m        = ctx_data["market"]
-
+    btc = BtcState.snapshot()
+    m   = ctx_data["market"]
     from context import MarketContext
     ctx = MarketContext(
-        up_price       = m["up_price"],
-        down_price     = m["down_price"],
-        elapsed_sec    = elapsed_sec,
-        market_id      = market_id,
-        btc_price      = btc["price"],
-        btc_change_1m  = btc["change_1m"],
-        btc_change_5m  = btc["change_5m"],
-        btc_volatility = btc["volatility"],
-        btc_trend      = btc["trend"],
-        liquidity_up   = ctx_data["liquidity_up"],
-        liquidity_down = ctx_data["liquidity_down"],
-        spread         = ctx_data["spread"],
+        up_price=m["up_price"], down_price=m["down_price"],
+        elapsed_sec=elapsed_sec, market_id=market_id,
+        btc_price=btc["price"], btc_change_1m=btc["change_1m"],
+        btc_change_5m=btc["change_5m"], btc_volatility=btc["volatility"],
+        btc_trend=btc["trend"], liquidity_up=ctx_data["liquidity_up"],
+        liquidity_down=ctx_data["liquidity_down"], spread=ctx_data["spread"],
     )
-
     try:
         strategy = strategy_loader.get(strategy_id)
     except KeyError as e:
         raise HTTPException(400, detail=str(e))
-
     sig = strategy.on_tick(ctx)
-    return {
-        "market_id":   market_id,
-        "strategy_id": strategy_id,
-        "up_price":    m["up_price"],
-        "down_price":  m["down_price"],
-        "btc":         btc,
-        "signal":      sig.as_dict(),
-    }
+    return {"market_id": market_id, "strategy_id": strategy_id,
+            "up_price": m["up_price"], "down_price": m["down_price"],
+            "btc": btc, "signal": sig.as_dict()}
+
+
+# ── Notes ────────────────────────────────────────────────────────
+
+@app.get("/api/notes/{market_id}")
+async def get_notes(market_id: str):
+    return {"market_id": market_id, "notes": _notes.get(market_id, [])}
+
+@app.post("/api/notes/{market_id}")
+async def add_note(market_id: str, req: NoteRequest):
+    _notes.setdefault(market_id, []).append(
+        {"tick": req.tick, "text": req.text, "ts": time.time()}
+    )
+    return {"ok": True}
+
+@app.delete("/api/notes/{market_id}")
+async def clear_notes(market_id: str):
+    _notes.pop(market_id, None)
+    return {"ok": True}
 
 
 # ── Simulate ─────────────────────────────────────────────────────
 
 async def _fetch_market_data(market_ids: list[str]) -> list[dict]:
-    async def _one(mid: str):
+    async def _one(mid):
         market = await md.get_market_by_id(mid)
         if not market:
             return None
         ctx     = await md.get_full_market_context(market)
         history = await md.build_price_history(ctx["market"])
         return {
-            "market":        ctx["market"],
-            "history":       history,
-            "ob_up":         ctx["ob_up"],
-            "ob_down":       ctx["ob_down"],
-            "liquidity_up":  ctx["liquidity_up"],
+            "market": ctx["market"], "history": history,
+            "ob_up": ctx["ob_up"], "ob_down": ctx["ob_down"],
+            "liquidity_up": ctx["liquidity_up"],
             "liquidity_down": ctx["liquidity_down"],
-            "spread":        ctx["spread"],
+            "spread": ctx["spread"],
         }
-    items = await asyncio.gather(*[_one(mid) for mid in market_ids])
+    items = await asyncio.gather(*[_one(m) for m in market_ids])
     return [i for i in items if i]
 
 
@@ -256,14 +361,11 @@ async def simulate(req: SimulateRequest):
         strategy_loader.get(req.strategy_id)
     except KeyError as e:
         raise HTTPException(400, detail=str(e))
-
     items = await _fetch_market_data(req.market_ids)
     if not items:
         raise HTTPException(404, detail="No valid markets found")
-
     result = await asyncio.to_thread(
-        run_simulation,
-        items, req.strategy_id, req.strategy_params,
+        run_simulation, items, req.strategy_id, req.strategy_params,
         req.initial_capital, req.stake_per_trade, req.max_open,
         req.enable_slippage, req.market_impact,
     )
@@ -277,79 +379,55 @@ async def compare(req: CompareRequest):
             strategy_loader.get(sid)
         except KeyError as e:
             raise HTTPException(400, detail=str(e))
-
     items = await _fetch_market_data(req.market_ids)
     if not items:
         raise HTTPException(404, detail="No valid markets found")
-
     results = await asyncio.to_thread(
-        run_comparison,
-        items, req.strategy_ids, req.strategy_params,
+        run_comparison, items, req.strategy_ids, req.strategy_params,
         req.initial_capital, req.stake_per_trade, req.max_open,
     )
     return {"results": results}
 
 
-# ── Export ───────────────────────────────────────────────────────
+# ── Export ────────────────────────────────────────────────────────
 
 @app.post("/api/export/csv")
 async def export_csv(req: SimulateRequest):
-    """Run simulation and return results as CSV download."""
     items = await _fetch_market_data(req.market_ids)
     if not items:
         raise HTTPException(404, detail="No valid markets found")
-
     result = await asyncio.to_thread(
-        run_simulation,
-        items, req.strategy_id, req.strategy_params,
+        run_simulation, items, req.strategy_id, req.strategy_params,
         req.initial_capital, req.stake_per_trade, req.max_open,
     )
     d = result.as_dict()
-
     output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow([
-        "market_id", "question", "direction",
-        "entry_tick", "entry_price", "exec_price", "slippage",
-        "exit_tick", "exit_price", "stake", "pnl", "pnl_pct",
-        "exit_reason", "signal_reason", "confidence",
-    ])
+    w = csv.writer(output)
+    w.writerow(["market_id","question","direction","entry_tick","entry_price",
+                "exec_price","slippage","exit_tick","exit_price","stake",
+                "pnl","pnl_pct","exit_reason","signal_reason","confidence"])
     for m in d["markets"]:
         for t in m["trades"]:
-            writer.writerow([
-                m["market_id"], m["question"][:60],
-                t.get("direction",""), t.get("entry_tick",""),
-                t.get("entry_price",""), t.get("exec_price",""),
-                t.get("slippage",""), t.get("exit_tick",""),
-                t.get("exit_price",""), t.get("stake",""),
-                t.get("pnl",""), t.get("pnl_pct",""),
-                t.get("exit_reason",""), t.get("signal_reason","")[:80],
-                t.get("confidence",""),
-            ])
-
+            w.writerow([m["market_id"], m["question"][:60],
+                t.get("direction",""), t.get("entry_tick",""), t.get("entry_price",""),
+                t.get("exec_price",""), t.get("slippage",""), t.get("exit_tick",""),
+                t.get("exit_price",""), t.get("stake",""), t.get("pnl",""),
+                t.get("pnl_pct",""), t.get("exit_reason",""),
+                t.get("signal_reason","")[:80], t.get("confidence","")])
     output.seek(0)
-    return StreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=polysnipe_trades.csv"},
-    )
+    return StreamingResponse(iter([output.getvalue()]), media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=polysnipe_trades.csv"})
 
 
 @app.post("/api/export/json")
 async def export_json(req: SimulateRequest):
-    """Run simulation and return full result as JSON download."""
     items = await _fetch_market_data(req.market_ids)
     if not items:
         raise HTTPException(404, detail="No valid markets found")
-
     result = await asyncio.to_thread(
-        run_simulation,
-        items, req.strategy_id, req.strategy_params,
+        run_simulation, items, req.strategy_id, req.strategy_params,
         req.initial_capital, req.stake_per_trade, req.max_open,
     )
     content = json.dumps(result.as_dict(), indent=2)
-    return StreamingResponse(
-        iter([content]),
-        media_type="application/json",
-        headers={"Content-Disposition": "attachment; filename=polysnipe_result.json"},
-    )
+    return StreamingResponse(iter([content]), media_type="application/json",
+        headers={"Content-Disposition": "attachment; filename=polysnipe_result.json"})
