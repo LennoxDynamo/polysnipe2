@@ -14,7 +14,10 @@ import logging
 
 import httpx
 
-from .context import BtcState
+try:
+    from .context import BtcState
+except ImportError:
+    from context import BtcState
 
 logger = logging.getLogger(__name__)
 
