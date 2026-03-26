@@ -4,10 +4,16 @@ simulator.py
 Tick-by-tick backtest engine.
 Supports multiple strategies, realistic slippage model,
 market impact, and per-trade detail logging.
+
+Changes vs v1:
+- TP/SL read from Trade object (set at entry from Signal), not from strategy.params at exit
+- Resolution logic distinguishes closed (binary 0/1) vs open (exit at current price) markets
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -25,11 +31,15 @@ class Trade:
     market_id:     str
     direction:     str
     entry_tick:    int
-    entry_price:   float          # requested price
-    exec_price:    float          # after slippage
-    slippage:      float          # exec_price - entry_price
+    entry_price:   float
+    exec_price:    float
+    slippage:      float
     stake:         float
-    shares:        float          # stake / exec_price
+    shares:        float
+
+    # TP/SL stored per-trade from the Signal that generated this entry
+    tp:            float = 0.38
+    sl:            float = 0.12
 
     exit_tick:     Optional[int]   = None
     exit_price:    Optional[float] = None
@@ -57,6 +67,8 @@ class Trade:
             "exec_price":   self.exec_price,
             "slippage":     self.slippage,
             "stake":        self.stake,
+            "tp":           self.tp,
+            "sl":           self.sl,
             "exit_tick":    self.exit_tick,
             "exit_price":   self.exit_price,
             "pnl":          self.pnl,
@@ -78,6 +90,7 @@ class MarketResult:
     trades:       list[Trade]  = field(default_factory=list)
     equity_curve: list[float]  = field(default_factory=list)
     price_curve:  list[dict]   = field(default_factory=list)
+    debug_log:    list[dict]   = field(default_factory=list)
 
     @property
     def pnl(self) -> float:
@@ -101,6 +114,7 @@ class MarketResult:
             "trades":       [t.as_dict() for t in self.trades],
             "equity_curve": self.equity_curve,
             "price_curve":  self.price_curve,
+            "debug_log":    self.debug_log,
         }
 
 
@@ -175,6 +189,28 @@ class SimResult:
 
 # ── Engine ───────────────────────────────────────────────────────
 
+def _resolve_exit_price(trade: Trade, market: dict, up_price: float, dn_price: float) -> float:
+    """
+    Determine the exit price when a market reaches its end (tick 299).
+
+    - Closed/resolved market → binary 1.0 (win) or 0.0 (loss)
+    - Active/unresolved market → exit at current live price (no premature binary assumption)
+    """
+    is_closed = market.get("closed", False)
+    target_up = market.get("up_price", 0.5)
+
+    if is_closed:
+        # Market has resolved — pay out at 1.0 or 0.0
+        won = (
+            (trade.direction == "UP"   and target_up > 0.5) or
+            (trade.direction == "DOWN" and target_up < 0.5)
+        )
+        return 1.0 if won else 0.0
+    else:
+        # Market still open — close at current tick price
+        return up_price if trade.direction == "UP" else dn_price
+
+
 def run_simulation(
     markets_with_data:  list[dict],
     strategy_id:        str,
@@ -183,7 +219,7 @@ def run_simulation(
     stake_per_trade:    float = 1.0,
     max_open:           int   = 2,
     enable_slippage:    bool  = True,
-    market_impact:      float = 0.002,   # fraction of stake/liquidity
+    market_impact:      float = 0.002,
 ) -> SimResult:
 
     strategy = strategy_loader.get(strategy_id, strategy_params)
@@ -195,6 +231,17 @@ def run_simulation(
         strategy_name  = strategy.NAME,
         initial_capital = initial_capital,
     )
+
+    def _run_with_stdout(fn, *args, _debug_sink=None):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            out = fn(*args)
+        if _debug_sink:
+            for line in buf.getvalue().splitlines():
+                msg = line.strip()
+                if msg:
+                    _debug_sink(msg, source="print")
+        return out
 
     for entry in markets_with_data:
         market   = entry["market"]
@@ -218,28 +265,34 @@ def run_simulation(
         )
         open_trades: dict[str, Trade] = {}
         price_window: list[dict] = []
+        current_tick = 0
 
-        strategy.on_market_start(MarketContext(
+        def _append_debug(message: str, source: str = "debug"):
+            mkt_result.debug_log.append({
+                "tick": max(0, int(current_tick)),
+                "source": source,
+                "message": str(message)[:500],
+            })
+
+        if hasattr(strategy, "set_debug_sink"):
+            strategy.set_debug_sink(lambda msg: _append_debug(msg, source="debug"))
+
+        _run_with_stdout(strategy.on_market_start, MarketContext(
             market_id=mkt_id, question=question,
             portfolio=portfolio, stake=stake_per_trade,
-        ))
+        ), _debug_sink=_append_debug)
 
-        # Simulate time-varying liquidity: low at start, peaks at ~50%, low at end
         def _liq_at(t: int, total_liq: float) -> float:
             progress = t / 300
-            # Bell curve: peaks at t=150
             import math
             factor = math.exp(-((progress - 0.5) ** 2) / (2 * 0.18 ** 2))
             return max(20.0, total_liq * factor)
 
-        # Compute slippage price using orderbook or fallback
         def _exec_price(direction: str, stake: float, t: int) -> tuple[float, float]:
-            """Returns (exec_price, slippage)."""
             if not enable_slippage:
                 ref = history[t]["up_price"] if direction == "UP" else history[t]["dn_price"]
                 return ref, 0.0
 
-            # Use orderbook if available, else linear approximation
             liq_for_side = _liq_at(t, liq_down if direction == "DOWN" else liq_up)
             ref_price    = history[t]["dn_price"] if direction == "DOWN" else history[t]["up_price"]
 
@@ -248,7 +301,6 @@ def run_simulation(
             elif ob_down and direction == "DOWN" and ob_down.get("asks"):
                 exec_p = _compute_slippage_price(ob_down["asks"], stake)
             else:
-                # Linear slippage: stake/liquidity × price
                 slip   = ref_price * (stake / max(liq_for_side, 1.0)) * 0.5
                 exec_p = min(0.95, ref_price + slip)
 
@@ -257,6 +309,7 @@ def run_simulation(
 
         for tick_data in history:
             t        = tick_data["t"]
+            current_tick = t
             up_price = tick_data["up_price"]
             dn_price = tick_data["dn_price"]
             price_window.append(tick_data)
@@ -264,29 +317,24 @@ def run_simulation(
             cur_liq_up   = _liq_at(t, liq_up)
             cur_liq_down = _liq_at(t, liq_down)
 
-            # ── Check exits ──────────────────────────────────────
+            # ── Check exits — use per-trade TP/SL from Signal ────
             for tid, trade in list(open_trades.items()):
                 cur = up_price if trade.direction == "UP" else dn_price
-                sig_tp = strategy.params.get("take_profit", 0.38)
-                sig_sl = strategy.params.get("stop_loss",   0.12)
 
-                if cur >= sig_tp:
-                    trade.close(cur, t, f"TP ({cur:.3f}≥{sig_tp})")
-                elif cur <= sig_sl:
-                    trade.close(cur, t, f"SL ({cur:.3f}≤{sig_sl})")
+                if cur >= trade.tp:
+                    trade.close(cur, t, f"TP ({cur:.3f}≥{trade.tp})")
+                elif cur <= trade.sl:
+                    trade.close(cur, t, f"SL ({cur:.3f}≤{trade.sl})")
                 elif t >= 299:
-                    target_up = market.get("up_price", 0.5)
-                    resolved  = 1.0 if (
-                        (trade.direction == "UP"   and target_up > 0.5) or
-                        (trade.direction == "DOWN" and target_up < 0.5)
-                    ) else 0.0
-                    trade.close(resolved, t, "Auflösung")
+                    exit_price = _resolve_exit_price(trade, market, up_price, dn_price)
+                    reason = "Auflösung (resolved)" if market.get("closed") else "Marktende (offen)"
+                    trade.close(exit_price, t, reason)
                 else:
                     continue
 
                 portfolio += trade.shares * trade.exit_price
                 mkt_result.trades.append(trade)
-                strategy.on_close(trade.as_dict())
+                _run_with_stdout(strategy.on_close, trade.as_dict(), _debug_sink=_append_debug)
                 del open_trades[tid]
 
             # ── Build context ────────────────────────────────────
@@ -313,13 +361,16 @@ def run_simulation(
             # ── Entry signal ──────────────────────────────────────
             already_dirs = {tr.direction for tr in open_trades.values()}
             if len(open_trades) < max_open and portfolio >= stake_per_trade:
-                sig = strategy.on_tick(ctx)
+                sig = _run_with_stdout(strategy.on_tick, ctx, _debug_sink=_append_debug)
 
                 if sig.action == "BUY" and sig.direction not in already_dirs:
                     exec_p, slippage = _exec_price(sig.direction, stake_per_trade, t)
 
-                    # Reject if slippage blows past our TP
-                    if exec_p < (sig.tp or 1.0):
+                    # Use TP/SL from signal, fall back to strategy params
+                    trade_tp = sig.tp if sig.tp is not None else strategy.params.get("take_profit", 0.38)
+                    trade_sl = sig.sl if sig.sl is not None else strategy.params.get("stop_loss",   0.12)
+
+                    if exec_p < trade_tp:
                         portfolio -= stake_per_trade
                         tid        = str(uuid.uuid4())[:8]
                         trade      = Trade(
@@ -332,12 +383,13 @@ def run_simulation(
                             slippage     = slippage,
                             stake        = stake_per_trade,
                             shares       = stake_per_trade / exec_p,
+                            tp           = trade_tp,
+                            sl           = trade_sl,
                             signal_reason = sig.reason,
                             confidence    = sig.confidence,
                         )
                         open_trades[tid] = trade
 
-                        # Apply market impact: shift price slightly
                         if enable_slippage and market_impact > 0:
                             impact = (stake_per_trade / max(
                                 cur_liq_down if sig.direction == "DOWN" else cur_liq_up, 1.0
@@ -354,17 +406,20 @@ def run_simulation(
                 "t": t, "up_price": up_price, "dn_price": dn_price,
             })
 
-        # Force-close remaining
+        # Force-close remaining open positions
         for tid, trade in list(open_trades.items()):
-            target_up = market.get("up_price", 0.5)
-            resolved  = 1.0 if (
-                (trade.direction == "UP"   and target_up > 0.5) or
-                (trade.direction == "DOWN" and target_up < 0.5)
-            ) else 0.0
-            trade.close(resolved, 299, "Auflösung")
-            portfolio += trade.shares * resolved
+            last = history[-1] if history else {}
+            up_price = last.get("up_price", market.get("up_price", 0.5))
+            dn_price = last.get("dn_price", 1 - up_price)
+            exit_price = _resolve_exit_price(trade, market, up_price, dn_price)
+            reason = "Auflösung (resolved)" if market.get("closed") else "Marktende (offen)"
+            trade.close(exit_price, 299, reason)
+            portfolio += trade.shares * exit_price
             mkt_result.trades.append(trade)
-            strategy.on_close(trade.as_dict())
+            _run_with_stdout(strategy.on_close, trade.as_dict(), _debug_sink=_append_debug)
+
+        if hasattr(strategy, "set_debug_sink"):
+            strategy.set_debug_sink(None)
 
         result.markets.append(mkt_result)
 

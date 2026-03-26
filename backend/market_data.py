@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 import httpx
+from fastapi import HTTPException
 from py_clob_client.client import ClobClient
 
 logger = logging.getLogger(__name__)
@@ -34,7 +35,25 @@ def get_clob() -> ClobClient:
 
 async def gamma_get(path: str, params: dict = None) -> list | dict:
     async with httpx.AsyncClient(timeout=12) as client:
-        r = await client.get(f"{GAMMA_BASE}{path}", params=params or {})
+        try:
+            r = await client.get(f"{GAMMA_BASE}{path}", params=params or {})
+        except httpx.ConnectError as e:
+            logger.error(f"Gamma API connection error: {e}")
+            raise HTTPException(503, detail="Gamma API nicht erreichbar — Verbindungsfehler")
+        except httpx.TimeoutException:
+            logger.error(f"Gamma API timeout for {path}")
+            raise HTTPException(504, detail="Gamma API Timeout — bitte erneut versuchen")
+
+        if r.status_code == 429:
+            retry = r.headers.get("Retry-After", "30")
+            logger.warning(f"Gamma API rate limit hit, retry-after: {retry}s")
+            raise HTTPException(429, detail=f"Polymarket Rate Limit — bitte {retry}s warten")
+        if r.status_code == 404:
+            raise HTTPException(404, detail=f"Markt nicht gefunden: {path}")
+        if r.status_code >= 500:
+            logger.error(f"Gamma API server error {r.status_code} for {path}")
+            raise HTTPException(502, detail=f"Polymarket Server-Fehler ({r.status_code})")
+
         r.raise_for_status()
         return r.json()
 
@@ -59,12 +78,18 @@ async def get_btc_5min_markets(lookback_windows: int = 12) -> list[dict]:
     markets, seen = [], set()
     for resp in responses:
         if isinstance(resp, Exception):
+            logger.debug(f"BTC 5min slug fetch error: {resp}")
+            continue
+        if isinstance(resp, httpx.Response) and resp.status_code == 429:
+            logger.warning("Rate limit hit during BTC 5min slug fetch")
             continue
         try:
-            for m in (resp.json() if isinstance(resp.json(), list) else []):
+            data = resp.json()
+            for m in (data if isinstance(data, list) else []):
                 if m.get("id") and m["id"] not in seen:
                     seen.add(m["id"]); markets.append(m)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"BTC 5min parse error: {e}")
             continue
     return _normalize_markets(markets)
 
@@ -75,6 +100,8 @@ async def get_market_by_id(market_id: str) -> Optional[dict]:
         if isinstance(data, list):
             data = data[0] if data else None
         return _normalize_market(data) if data else None
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"get_market_by_id({market_id}): {e}")
         return None
@@ -93,8 +120,6 @@ def _clob_midpoints(token_ids: list[str]) -> dict[str, float]:
     except Exception as e:
         logger.debug(f"get_midpoints batch error: {e}")
 
-    # Fallback for py-clob-client versions where get_midpoints does not
-    # accept plain token-id strings.
     out: dict[str, float] = {}
     for tid in token_ids:
         try:
@@ -127,7 +152,6 @@ def _clob_order_book(token_id: str) -> Optional[dict]:
         best_ask = asks[0][0] if asks else None
         spread   = round(best_ask - best_bid, 4) if best_bid and best_ask else None
 
-        # Total liquidity = sum of sizes × prices for first 10 levels
         liq_bid = sum(p * s for p, s in bids[:10])
         liq_ask = sum(p * s for p, s in asks[:10])
 
@@ -144,11 +168,6 @@ def _clob_order_book(token_id: str) -> Optional[dict]:
 
 
 def _compute_slippage_price(book_levels: list[tuple], stake: float) -> float:
-    """
-    Compute the average execution price for a given $ stake
-    by walking the order book levels [(price, size), ...].
-    Returns the actual average price paid (higher than best ask due to slippage).
-    """
     if not book_levels:
         return book_levels[0][0] if book_levels else 0.5
 
@@ -215,10 +234,6 @@ async def enrich_with_live_prices(markets: list[dict]) -> list[dict]:
 
 
 async def get_full_market_context(market: dict) -> dict:
-    """
-    Returns enriched market data including live price, order book,
-    liquidity and spread — used to build MarketContext for strategies.
-    """
     tids = market.get("token_ids", [])
     ob_up = ob_dn = None
 
@@ -257,7 +272,6 @@ async def build_price_history(market: dict, ticks: int = 300) -> list[dict]:
 
     if real_trades:
         return _trades_to_ticks(real_trades, ticks, live_up, is_closed)
-    # No trade history available (auth required) — use live price with realistic volatility
     return _live_price_walk(live_up, ticks, is_closed)
 
 
@@ -283,38 +297,22 @@ def _trades_to_ticks(trades: list, ticks: int, live_up: float, is_closed: bool) 
 
 
 def _live_price_walk(live_up: float, ticks: int = 300, resolved: bool = False) -> list[dict]:
-    """
-    Generate price history using live price + recent volatility.
-    When trade history isn't available, this creates realistic-looking paths
-    centered around the current live price rather than synthetic random walks.
-    """
     import random
     random.seed(int(live_up * 1e6) ^ ticks)
-    
-    # Start from a recent price near live (wiggle room)
-    start_offset = (random.random() - 0.5) * 0.04  # ±2% from live
+
+    start_offset = (random.random() - 0.5) * 0.04
     up = max(0.02, min(0.98, live_up + start_offset))
-    
+
     history = []
     for t in range(ticks):
         progress = t / ticks
-        
-        # Pull toward live price (stronger near end)
         pull = (live_up - up) * (0.005 + progress * 0.02)
-        
-        # Market-like noise (reduced for 5-min windows)
-        volatility = 0.008 * (1 - progress * 0.3)  # Decay over time
+        volatility = 0.008 * (1 - progress * 0.3)
         noise = (random.random() - 0.5) * volatility
-        
-        # Occasional small spike (market ticks)
         spike = (random.random() - 0.5) * 0.04 if random.random() < 0.08 else 0
-        
-        # Update price with bounds
         up = max(0.02, min(0.98, up + pull + noise + spike))
-        
         history.append({"t": t, "up_price": round(up, 4), "dn_price": round(1 - up, 4)})
-    
-    # End at live price (ensures consistency with right panel)
+
     history[-1].update({"up_price": round(live_up, 4), "dn_price": round(1 - live_up, 4)})
     return history
 

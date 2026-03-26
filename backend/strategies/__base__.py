@@ -8,7 +8,7 @@ containing a class named `Strategy(BaseStrategy)`.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Literal
+from typing import Optional, Literal, Callable
 
 
 @dataclass
@@ -54,6 +54,7 @@ class BaseStrategy:
             k: v for k, v in params.items()
             if k in self.PARAMS
         })
+        self._debug_sink: Optional[Callable[[str], None]] = None
 
     # ── Required ─────────────────────────────────────────────────
     def on_tick(self, ctx) -> Signal:
@@ -80,6 +81,16 @@ class BaseStrategy:
     def reset(self) -> None:
         """Reset any internal state (called before each backtest run)."""
         pass
+
+    # ── Optional debug output ────────────────────────────────────
+    def set_debug_sink(self, sink: Optional[Callable[[str], None]]) -> None:
+        """Set a callback used by debug() to emit strategy logs."""
+        self._debug_sink = sink
+
+    def debug(self, message: str) -> None:
+        """Emit debug text if a sink is configured (no-op otherwise)."""
+        if self._debug_sink:
+            self._debug_sink(str(message))
 
     # ── Helpers available to all strategies ──────────────────────
     def _confidence(self, buy_price: float) -> float:

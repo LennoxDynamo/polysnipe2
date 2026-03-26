@@ -84,7 +84,6 @@ header {
 }
 .logo span { color: var(--blue); }
 
-/* BTC bar in header */
 .btc-pills {
   display: flex; gap: 6px; align-items: center; margin-left: 4px;
 }
@@ -100,7 +99,6 @@ header {
 .pill-up   { background: var(--green-50); color: var(--green); }
 .pill-down { background: var(--red-50);   color: var(--red); }
 .pill-side { background: var(--gray-100); color: var(--gray-500); }
-.pill-dot  { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 
 .hdr-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .status-badge {
@@ -179,6 +177,7 @@ header {
 input[type=range] {
   width: 100%;
   -webkit-appearance: none;
+  appearance: none;
   height: 4px;
   background: var(--gray-200);
   border-radius: 4px;
@@ -321,7 +320,6 @@ input[type=range]::-webkit-slider-thumb:hover {
 
 canvas#chart { flex: 1; display: block; width: 100%; min-height: 0; border-radius: var(--radius); }
 
-/* compare view */
 #compareView {
   flex: 1; overflow-y: auto; padding: 16px;
   background: var(--gray-50); display: none;
@@ -471,7 +469,6 @@ canvas#chart { flex: 1; display: block; width: 100%; min-height: 0; border-radiu
 .price-vol  { color: var(--gray-400); font-size: 10px; margin-left: auto; }
 .price-src  { font-size: 9px; padding: 2px 5px; border-radius: 4px; background: var(--gray-100); color: var(--gray-400); }
 
-/* live price update flash */
 .price-chip.flash { animation: flash .4s ease; }
 @keyframes flash { 0%,100%{opacity:1} 50%{opacity:.4} }
 
@@ -488,11 +485,9 @@ canvas#chart { flex: 1; display: block; width: 100%; min-height: 0; border-radiu
 .mc-btn-info { background: var(--gray-100); color: var(--gray-500); }
 .mc-btn-info:hover { background: var(--gray-200); }
 
-/* seconds left bar */
 .seconds-bar { height: 2px; background: var(--gray-100); border-radius: 2px; margin-top: 6px; overflow: hidden; }
 .seconds-fill { height: 100%; border-radius: 2px; transition: width 1s linear; }
 
-/* drag handle */
 .drag-handle {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
   color: var(--gray-200); font-size: 16px; cursor: grab; user-select: none;
@@ -589,6 +584,7 @@ canvas#chart { flex: 1; display: block; width: 100%; min-height: 0; border-radiu
   font-size: 12px; font-weight: 500; z-index: 200; display: none;
   box-shadow: var(--shadow-lg); animation: row-in .2s ease;
 }
+#toast.is-error { background: var(--red); }
 
 /* misc */
 select {
@@ -601,13 +597,44 @@ select:focus { border-color: var(--blue); }
 
 .divider { height: 1px; background: var(--gray-100); margin: 2px 0; }
 
-/* note pin on chart */
-.note-dot {
-  position: absolute; width: 8px; height: 8px;
-  background: var(--amber); border-radius: 50%; transform: translate(-50%,-50%);
-  cursor: pointer; z-index: 5;
-  box-shadow: 0 0 0 2px white;
+/* ── DEBUG CONSOLE ─────────────────────────────────────────────── */
+.dbg-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
 }
+.dbg-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--gray-500);
+  cursor: pointer;
+}
+.dbg-console {
+  display: none;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  padding: 8px;
+}
+.dbg-line {
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  padding: 2px 0;
+}
+.dbg-line:last-child { border-bottom: none; }
+.dbg-meta { color: #93c5fd; margin-right: 6px; }
+.dbg-print .dbg-meta { color: #fbbf24; }
 </style>
 </head>
 <body>
@@ -647,19 +674,16 @@ select:focus { border-color: var(--blue); }
 <!-- ══ LEFT SIDEBAR ═════════════════════════════════════════════════ -->
 <div class="sidebar">
 
-  <!-- Algorithm selection -->
   <div class="sidebar-section">
     <div class="section-label">Algorithm</div>
     <div id="strategyList"><div class="empty-state">Lade…</div></div>
   </div>
 
-  <!-- Params (dynamic) -->
   <div class="sidebar-section" id="paramSection">
     <div class="section-label">Parameter</div>
     <div id="paramSliders"></div>
   </div>
 
-  <!-- Simulation settings -->
   <div class="sidebar-section">
     <div class="section-label">Simulation</div>
     <div class="param-row">
@@ -689,15 +713,22 @@ select:focus { border-color: var(--blue); }
     </div>
   </div>
 
-  <!-- Signal box -->
+  <!-- Signal badge — fetched from backend API -->
   <div id="signalBadge" class="signal-badge">
     <div class="sb-title" id="sbTitle">—</div>
     <div class="sb-reason" id="sbReason"></div>
   </div>
 
-  <!-- Actions -->
   <div class="sidebar-section" style="margin-top:auto">
     <div style="display:flex;flex-direction:column;gap:6px">
+      <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--gray-500);cursor:pointer">
+        <input type="checkbox" id="cAutoAdv" checked style="accent-color:var(--blue)">
+        Auto → nächster Markt
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:var(--gray-500);cursor:pointer">
+        <input type="checkbox" id="cAutoScan" checked style="accent-color:var(--blue)">
+        Neue Märkte (15s)
+      </label>
       <button class="btn btn-primary" id="btnStart" onclick="startSim()" disabled>
         ▶  Simulation starten
       </button>
@@ -721,7 +752,6 @@ select:focus { border-color: var(--blue); }
 <!-- ══ CENTER ═══════════════════════════════════════════════════════ -->
 <div class="center">
 
-  <!-- Stats bar -->
   <div class="stats-bar">
     <div class="stat-card">
       <div class="stat-label">Portfolio</div>
@@ -750,7 +780,6 @@ select:focus { border-color: var(--blue); }
     </div>
   </div>
 
-  <!-- Market ticker -->
   <div class="mkt-ticker">
     <div class="tick-item"><span class="tick-key">MARKT</span><span class="tick-val" id="tMkt">—</span></div>
     <div class="tick-item"><span class="tick-key">t=</span><span class="tick-val" id="tTime">—</span></div>
@@ -763,14 +792,12 @@ select:focus { border-color: var(--blue); }
     </div>
   </div>
 
-  <!-- Chart tabs -->
   <div class="chart-tabs">
     <button class="ctab active" onclick="setChartTab('price')">Preisverlauf</button>
     <button class="ctab" onclick="setChartTab('portfolio')">Portfolio</button>
     <button class="ctab" onclick="setChartTab('compare')">Strategie-Vergleich</button>
   </div>
 
-  <!-- Chart -->
   <div class="chart-wrap" id="chartWrap"
        ondragover="onDragOverChart(event)"
        ondragleave="onDragLeaveChart()"
@@ -785,7 +812,6 @@ select:focus { border-color: var(--blue); }
     <canvas id="chart"></canvas>
   </div>
 
-  <!-- Compare view -->
   <div id="compareView">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
       <div style="font-size:13px;font-weight:600;color:var(--gray-700)">Strategie-Vergleich</div>
@@ -794,7 +820,6 @@ select:focus { border-color: var(--blue); }
     <div id="cmpTable"><div class="empty-state">Märkte zur Queue hinzufügen → Vergleich starten</div></div>
   </div>
 
-  <!-- Trade log -->
   <div class="log-section">
     <div class="log-header">
       <span>#</span><span>Zeit</span><span>Dir</span>
@@ -809,7 +834,6 @@ select:focus { border-color: var(--blue); }
 <!-- ══ RIGHT PANEL ══════════════════════════════════════════════════ -->
 <div class="right-panel">
 
-  <!-- Search + market discovery -->
   <div class="rp-section">
     <div class="section-label">Märkte entdecken</div>
     <div class="search-box">
@@ -826,7 +850,6 @@ select:focus { border-color: var(--blue); }
     <div id="mktList"><div class="empty-state">Verbinde mit Backend…</div></div>
   </div>
 
-  <!-- Simulation Queue (drag-drop) -->
   <div class="rp-section">
     <div class="queue-header">
       <div class="section-label" style="margin:0">Simulation Queue</div>
@@ -842,7 +865,6 @@ select:focus { border-color: var(--blue); }
     </div>
   </div>
 
-  <!-- Orderbook -->
   <div class="rp-section" id="obSection" style="display:none">
     <div class="section-label">Orderbook — <span id="obLabel" style="text-transform:none;letter-spacing:0;color:var(--gray-500)">—</span></div>
     <div style="margin-bottom:8px">
@@ -869,10 +891,21 @@ select:focus { border-color: var(--blue); }
     </div>
   </div>
 
-  <!-- Open Positions -->
   <div class="rp-section">
     <div class="section-label">Offene Positionen</div>
     <div id="posList"><div class="empty-state">Keine Positionen</div></div>
+  </div>
+
+  <div class="rp-section">
+    <div class="section-label">Debug Konsole</div>
+    <div class="dbg-controls">
+      <label class="dbg-toggle">
+        <input type="checkbox" id="dbgEnable" style="accent-color:var(--blue)">
+        Aktivieren
+      </label>
+      <button class="btn btn-ghost btn-sm" style="width:auto" onclick="clearDebugConsole()">Leeren</button>
+    </div>
+    <div id="debugConsole" class="dbg-console"></div>
   </div>
 
 </div><!-- right panel -->
@@ -898,12 +931,31 @@ async function api(path, opts={}) {
   return r.json();
 }
 
-function toast(msg, ok=false) {
-  $('toast').textContent = msg;
-  $('toast').style.background = ok ? 'var(--green)' : 'var(--gray-900)';
+// ── SAFE API — zentrale Fehlerbehandlung ──────────────────────────
+// Alle UI-Aufrufe nutzen safeApi(). Bei Fehler: Toast + null zurück.
+// errMsg: kurzer Kontext-String z.B. "Orderbook laden"
+async function safeApi(path, opts={}, errMsg='Fehler') {
+  try {
+    return await api(path, opts);
+  } catch(e) {
+    const msg = e.message || String(e);
+    // Rate limit bekommt einen speziellen Hinweis
+    const isRateLimit = msg.includes('429') || msg.toLowerCase().includes('rate limit');
+    toast(isRateLimit ? `Rate Limit: ${msg}` : `${errMsg}: ${msg}`, isRateLimit ? 'warn' : 'error');
+    console.warn(`safeApi(${path}):`, msg);
+    return null;
+  }
+}
+
+let _toastTimer = null;
+function toast(msg, type='info') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = type === 'error' ? 'is-error' : type === 'warn' ? 'is-warn' : '';
+  el.style.background = type === 'error' ? 'var(--red)' : type === 'warn' ? 'var(--amber)' : 'var(--gray-900)';
   show('toast');
-  clearTimeout($('toast')._t);
-  $('toast')._t = setTimeout(()=>hide('toast'), 3500);
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(()=>hide('toast'), type === 'error' ? 5000 : 3500);
 }
 
 function status(text, cls) {
@@ -930,14 +982,14 @@ upd();
 
 // ── STRATEGIES ────────────────────────────────────────────────────
 async function loadStrategies() {
-  try {
-    const d = await api('/strategies');
-    strategies = d.strategies || [];
-    renderStrategyList();
-    if (strategies.length) selectStrategy(strategies[0].id);
-  } catch(e) {
+  const d = await safeApi('/strategies', {}, 'Strategien laden');
+  if (!d) {
     $('strategyList').innerHTML='<div class="empty-state" style="color:var(--red)">Backend offline</div>';
+    return;
   }
+  strategies = d.strategies || [];
+  renderStrategyList();
+  if (strategies.length) selectStrategy(strategies[0].id);
 }
 
 function renderStrategyList() {
@@ -959,6 +1011,8 @@ function selectStrategy(sid) {
   strategyParams = { ...activeStrategy.current_params };
   renderStrategyList();
   renderParamSliders();
+  // Refresh signal badge for new strategy
+  if (_signalMarketId) fetchAndShowSignal(_signalMarketId, 0);
 }
 
 function renderParamSliders() {
@@ -1002,7 +1056,8 @@ function connectWS() {
       wsRetry=0;
       st('wsStatus','WS: ●');
       $('wsStatus').style.color='var(--green)';
-      // Keep alive ping
+      // Clear stale frontend price cache on reconnect — backend may have restarted
+      Object.keys(_priceCache).forEach(k => delete _priceCache[k]);
       clearInterval(ws._ping);
       ws._ping = setInterval(()=>{ if(ws.readyState===1) ws.send('ping'); }, 20000);
     };
@@ -1043,29 +1098,23 @@ function updateBtcBar(b) {
 function updateLivePrice(mktId, up, dn) {
   _priceCache[mktId] = { up, dn, ts: Date.now() };
 
-  // Update in btcMarkets / searchResults arrays
   [btcMarkets, searchResults].forEach(arr => {
     const m=arr.find(x=>x.id===mktId);
     if (m) { m.up_price=up; m.down_price=dn; m.price_source='clob_live'; }
   });
-  // Update queue items
   const qi=queueItems.find(x=>x.id===mktId);
   if (qi) { qi.up_price=up; qi.down_price=dn; }
 
-  // Update DOM chips
   const chip=document.querySelector(`[data-mktid="${mktId}"] .price-up`);
   const chipdm=document.querySelector(`[data-mktid="${mktId}"] .price-dn`);
   if (chip) { chip.textContent='UP '+(up*100).toFixed(1)+'%'; }
   if (chipdm) { chipdm.textContent='DN '+(dn*100).toFixed(1)+'%'; }
 
-  // Update ticker if this is active sim market
   if (currentSim && currentSim.market?.id===mktId) {
     st('tUp',up.toFixed(3)); st('tDn',dn.toFixed(3));
-
     Object.values(openPos).forEach(pos=>{
       pos.curP = pos.direction==='UP' ? up : dn;
     });
-
     if (currentSim.market.active && !currentSim.market.closed && chartPrices.length) {
       chartPrices[chartPrices.length - 1] = up;
       renderPositions();
@@ -1087,11 +1136,11 @@ function updateLivePrice(mktId, up, dn) {
 
 // ── BTC / HEALTH polling fallback ────────────────────────────────
 async function refreshHealth() {
-  try {
-    const d = await api('/health');
+  const d = await safeApi('/health', {}, 'Health-Check');
+  if (d) {
     if (d.btc) updateBtcBar(d.btc);
     status('Live','status-live');
-  } catch(e) {
+  } else {
     status('Offline','status-error');
   }
 }
@@ -1106,10 +1155,22 @@ let btcMarkets=[], searchResults=[], tab='btc';
 let searchTimer=null;
 let chartTab='price';
 let lastSimResult=null, lastSimReq=null;
-let queueItems=[];   // full market objects in queue
+let queueItems=[];
 let liveFocusMarketId=null;
 let liveFocusMarketQuestion='';
 let historicalReplaySpeed=8;
+let debugByTick = {};
+let debugTickCursor = -1;
+let debugBuffer = [];
+let autoAdvance = true;
+let autoScanNewMarkets = true;
+
+// Signal badge state — tracks which market+tick we last fetched for
+let _signalMarketId = null;
+let _signalFetchTimer = null;
+let _livePricePollTimer = null;
+let _livePricePollMarketId = null;
+let _livePricePollInFlight = false;
 
 function updReplaySpeed() {
   const sel = $('replaySpeed');
@@ -1122,6 +1183,138 @@ function initState() {
   portfolio=cfg.cap; pnl=0; trades=0; wins=0; losses=0; mktsRun=0; totalSlip=0;
   openPos={}; portHistory=[cfg.cap]; chartPrices=[];
   tradeNum=0; currentSim=null;
+  debugByTick={};
+  debugTickCursor=-1;
+  debugBuffer=[];
+  clearDebugConsole();
+}
+
+function debugEnabled() {
+  return !!$('dbgEnable')?.checked;
+}
+
+function clearDebugConsole() {
+  const el = $('debugConsole');
+  if (el) el.innerHTML = '';
+  debugBuffer = [];
+}
+
+function appendDebugLine(line) {
+  debugBuffer.push(line);
+  if (!debugEnabled()) return;
+  const el = $('debugConsole');
+  if (!el) return;
+  const row = document.createElement('div');
+  row.className = `dbg-line ${line.source === 'print' ? 'dbg-print' : ''}`;
+  row.innerHTML = `<span class="dbg-meta">[t=${line.tick}s] ${line.source}</span>${line.message}`;
+  el.appendChild(row);
+  el.scrollTop = el.scrollHeight;
+}
+
+function rerenderDebugConsole() {
+  const el = $('debugConsole');
+  if (!el) return;
+  if (!debugEnabled()) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  el.innerHTML = '';
+  debugBuffer.forEach(line => {
+    const row = document.createElement('div');
+    row.className = `dbg-line ${line.source === 'print' ? 'dbg-print' : ''}`;
+    row.innerHTML = `<span class="dbg-meta">[t=${line.tick}s] ${line.source}</span>${line.message}`;
+    el.appendChild(row);
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+function setDebugLogForMarket(market) {
+  debugByTick = {};
+  debugTickCursor = -1;
+  clearDebugConsole();
+  const logs = market?.debug_log || [];
+  logs.forEach(line => {
+    const t = Number.isFinite(line.tick) ? line.tick : 0;
+    (debugByTick[t] = debugByTick[t] || []).push({
+      tick: t,
+      source: line.source || 'debug',
+      message: String(line.message || ''),
+    });
+  });
+}
+
+function flushDebugUntilTick(tick) {
+  for (let t = debugTickCursor + 1; t <= tick; t++) {
+    const lines = debugByTick[t] || [];
+    lines.forEach(appendDebugLine);
+  }
+  debugTickCursor = Math.max(debugTickCursor, tick);
+}
+
+// ── SIGNAL — via Backend API (Korrektur: nicht Frontend-Logik duplizieren) ──
+// Holt das echte Signal der aktiven Strategie vom Backend.
+// Wird alle 3s während der Simulation aufgerufen, und beim Strategiewechsel.
+async function fetchAndShowSignal(marketId, elapsedSec) {
+  if (!activeStrategy || !marketId) return;
+  const d = await safeApi(
+    `/signal/${marketId}?strategy=${activeStrategy.id}&elapsed_sec=${elapsedSec}`,
+    {},
+    'Signal laden'
+  );
+  if (!d) return;
+  const sig = d.signal;
+  const sb=$('signalBadge');
+  sb.style.display='block';
+  if (sig.action === 'BUY') {
+    sb.className='signal-badge buy';
+    st('sbTitle',`● BUY ${sig.direction} @ ${sig.price?.toFixed(3) ?? '—'}`);
+    st('sbReason', sig.reason?.slice(0,80) ?? '');
+  } else if (sig.action === 'SKIP') {
+    sb.className='signal-badge skip';
+    st('sbTitle','○ SKIP');
+    st('sbReason', sig.reason?.slice(0,80) ?? '');
+  } else {
+    sb.className='signal-badge hold';
+    st('sbTitle','○ HOLD');
+    st('sbReason', sig.reason?.slice(0,80) ?? '');
+  }
+}
+
+// Schedules periodic signal refresh every 3s (rate-limited)
+function scheduleSignalRefresh(marketId, tick) {
+  _signalMarketId = marketId;
+  if (tick % 3 !== 0) return;
+  clearTimeout(_signalFetchTimer);
+  _signalFetchTimer = setTimeout(() => fetchAndShowSignal(marketId, tick), 0);
+}
+
+function stopLivePricePolling() {
+  if (_livePricePollTimer) {
+    clearInterval(_livePricePollTimer);
+    _livePricePollTimer = null;
+  }
+  _livePricePollMarketId = null;
+  _livePricePollInFlight = false;
+}
+
+function startLivePricePolling(marketId) {
+  stopLivePricePolling();
+  if (!marketId) return;
+  _livePricePollMarketId = marketId;
+
+  const poll = async () => {
+    if (!simRunning || !_livePricePollMarketId || _livePricePollInFlight) return;
+    _livePricePollInFlight = true;
+    const d = await safeApi('/market/' + _livePricePollMarketId, {}, 'Live-Preis laden');
+    if (d && typeof d.up_price === 'number' && typeof d.down_price === 'number') {
+      updateLivePrice(_livePricePollMarketId, d.up_price, d.down_price);
+    }
+    _livePricePollInFlight = false;
+  };
+
+  poll();
+  _livePricePollTimer = setInterval(poll, 750);
 }
 
 // ── MARKET PANEL ─────────────────────────────────────────────────
@@ -1130,41 +1323,36 @@ async function loadBtc5min(silent=false) {
     $('mktStatus').textContent='Lade BTC 5-min Märkte…';
     $('mktList').innerHTML='<div class="empty-state">Laden…</div>';
   }
-  try {
-    const d=await api('/markets/btc5min?lookback=10');
-    const fresh=d.markets||[];
-
-    // Preserve freshest live quote if we already have one in cache.
-    fresh.forEach(m=>{
-      const cached=_priceCache[m.id];
-      if (cached) {
-        m.up_price = cached.up;
-        m.down_price = cached.dn;
-        m.price_source = 'clob_live';
-      }
-    });
-
-    btcMarkets=fresh;
-    if (tab==='btc' && silent) {
-      patchVisibleMarketCards(btcMarkets);
-    } else {
-      renderMarkets(btcMarkets);
-    }
-    $('mktStatus').textContent=`${btcMarkets.length} Märkte · alle 15s aktualisiert`;
-    $('mktStatus').style.color='var(--gray-400)';
-    status('Live','status-live');
-    // Track active markets for WS updates
-    const activeIds=btcMarkets.filter(m=>m.active&&!m.closed).map(m=>m.id);
-    if (activeIds.length) api('/track',{method:'POST',body:JSON.stringify({market_ids:activeIds})}).catch(()=>{});
-  } catch(e) {
-    $('mktStatus').textContent='✗ '+e.message;
+  const d = await safeApi('/markets/btc5min?lookback=3', {}, 'BTC 5-min laden');
+  if (!d) {
+    $('mktStatus').textContent='✗ Laden fehlgeschlagen';
     $('mktStatus').style.color='var(--red)';
-    $('mktList').innerHTML=`<div class="empty-state" style="color:var(--red)">
-      Backend nicht erreichbar.<br><br>
-      <code style="background:var(--gray-100);padding:2px 6px;border-radius:4px;color:var(--gray-700)">cd backend; python -m uvicorn main:app --reload</code>
-    </div>`;
-    status('Offline','status-error');
+    if (!silent) {
+      $('mktList').innerHTML=`<div class="empty-state" style="color:var(--red)">
+        Backend nicht erreichbar.<br><br>
+        <code style="background:var(--gray-100);padding:2px 6px;border-radius:4px;color:var(--gray-700)">cd backend; python -m uvicorn main:app --reload</code>
+      </div>`;
+      status('Offline','status-error');
+    }
+    return;
   }
+
+  const fresh = d.markets || [];
+  fresh.forEach(m=>{
+    const cached=_priceCache[m.id];
+    if (cached) { m.up_price=cached.up; m.down_price=cached.dn; m.price_source='clob_live'; }
+  });
+  btcMarkets=fresh;
+  if (tab==='btc' && silent) {
+    patchVisibleMarketCards(btcMarkets);
+  } else {
+    renderMarkets(btcMarkets);
+  }
+  $('mktStatus').textContent=`${btcMarkets.length} Märkte · alle 15s aktualisiert`;
+  $('mktStatus').style.color='var(--gray-400)';
+  status('Live','status-live');
+  const activeIds=btcMarkets.filter(m=>m.active&&!m.closed).map(m=>m.id);
+  if (activeIds.length) safeApi('/track',{method:'POST',body:JSON.stringify({market_ids:activeIds})}, 'Track märkte');
 }
 
 function patchVisibleMarketCards(list) {
@@ -1212,15 +1400,15 @@ function onSearch(v) {
 async function doSearch(q) {
   setTab('search'); $('tabSearch').disabled=false;
   $('mktList').innerHTML='<div class="empty-state">Suche…</div>';
-  try {
-    const d=await api('/markets/search?q='+encodeURIComponent(q)+'&limit=40');
-    searchResults=d.markets||[];
-    renderMarkets(searchResults);
-    $('mktStatus').textContent=searchResults.length+' Ergebnisse';
-  } catch(e) {
-    $('mktStatus').textContent='✗ '+e.message;
-    $('mktStatus').style.color='var(--red)';
-  } finally { $('searchSpinner').style.display='none'; }
+  const d = await safeApi('/markets/search?q='+encodeURIComponent(q)+'&limit=40', {}, 'Marktsuche');
+  $('searchSpinner').style.display='none';
+  if (!d) {
+    $('mktStatus').textContent='✗ Suche fehlgeschlagen';
+    return;
+  }
+  searchResults = d.markets || [];
+  renderMarkets(searchResults);
+  $('mktStatus').textContent = searchResults.length + ' Ergebnisse';
 }
 function setTab(t) {
   tab=t;
@@ -1266,7 +1454,6 @@ function renderMarkets(list) {
       </div>
       ${sl!=null?`<div class="seconds-bar"><div class="seconds-fill" style="width:${slPct}%;background:${slPct>50?'var(--blue)':slPct>20?'var(--amber)':'var(--red)'}"></div></div>`:''}
     `;
-    // Drag events
     card.addEventListener('dragstart', e => {
       e.dataTransfer.setData('market_id', m.id);
       e.dataTransfer.setData('market_json', JSON.stringify(m));
@@ -1285,8 +1472,7 @@ function enqueue(id) {
   renderQueue();
   renderMarkets(tab==='btc'?btcMarkets:searchResults);
   $('btnStart').disabled=false;
-  // Track for live updates
-  api('/track',{method:'POST',body:JSON.stringify({market_ids:[id]})}).catch(()=>{});
+  safeApi('/track',{method:'POST',body:JSON.stringify({market_ids:[id]})}, 'Track markt');
 }
 
 function dequeue(id) {
@@ -1325,7 +1511,6 @@ function renderQueue() {
         ${m.active&&!m.closed?'<div class="mc-live" style="font-size:9px">●LIVE</div>':''}
       </div>
     `;
-    // Drag to reorder
     item.addEventListener('dragstart', e => {
       e.dataTransfer.setData('queue_idx', i);
       e.dataTransfer.setData('market_id', m.id);
@@ -1362,14 +1547,14 @@ function onDropToQueue(e) {
       renderQueue();
       renderMarkets(tab==='btc'?btcMarkets:searchResults);
       $('btnStart').disabled=false;
-      api('/track',{method:'POST',body:JSON.stringify({market_ids:[mid]})}).catch(()=>{});
-      toast('Markt zur Queue hinzugefügt',true);
+      safeApi('/track',{method:'POST',body:JSON.stringify({market_ids:[mid]})}, 'Track markt');
+      toast('Markt zur Queue hinzugefügt','info');
     } catch {}
   }
 }
 
 function getMarketById(mid) {
-  return [...queueItems, ...btcMarkets, ...searchResults].find(m=>m.id===mid) || null;
+  return [...btcMarkets, ...searchResults, ...queueItems].find(m=>m.id===mid) || null;
 }
 
 function focusMarketForChart(market) {
@@ -1382,9 +1567,9 @@ function focusMarketForChart(market) {
   st('chartLabel', `UP-Preis — LIVE Fokus: ${(liveFocusMarketQuestion||'').slice(0,48)}`);
   st('liveLabel', '● LIVE Fokus aktiv');
   $('liveLabel').style.color='var(--green)';
-  api('/track',{method:'POST',body:JSON.stringify({market_ids:[market.id]})}).catch(()=>{});
+  safeApi('/track',{method:'POST',body:JSON.stringify({market_ids:[market.id]})}, 'Track markt');
   redraw();
-  toast('Live-Chart Fokus gesetzt', true);
+  toast('Live-Chart Fokus gesetzt','info');
 }
 
 function onDragOverChart(e) {
@@ -1392,47 +1577,42 @@ function onDragOverChart(e) {
   $('chartWrap').classList.add('drop-target');
   show('chartDropHint');
 }
-
 function onDragLeaveChart() {
   $('chartWrap').classList.remove('drop-target');
   hide('chartDropHint');
 }
-
 function onDropToChart(e) {
   e.preventDefault();
   onDragLeaveChart();
   const mid = e.dataTransfer.getData('market_id');
   const raw = e.dataTransfer.getData('market_json');
   let market = null;
-  if (raw) {
-    try { market = JSON.parse(raw); } catch {}
-  }
+  if (raw) { try { market = JSON.parse(raw); } catch {} }
   if (!market && mid) market = getMarketById(mid);
   if (market) focusMarketForChart(market);
 }
 
 // ── ORDERBOOK ─────────────────────────────────────────────────────
 async function showOrderbook(mktId,label) {
-  try {
-    const d=await api('/market/'+mktId);
-    show('obSection');
-    st('obLabel',label);
-    const maxL=Math.max(d.liquidity_up||0,d.liquidity_down||0,1);
-    $('liqUpFill').style.width=Math.min(100,(d.liquidity_up/maxL)*100)+'%';
-    $('liqDnFill').style.width=Math.min(100,(d.liquidity_down/maxL)*100)+'%';
-    st('liqUpVal','$'+(d.liquidity_up||0).toFixed(0));
-    st('liqDnVal','$'+(d.liquidity_down||0).toFixed(0));
-    const render=(elId,levels,col)=>{
-      const el=$(elId); if(!el) return; el.innerHTML='';
-      (levels||[]).slice(0,5).forEach(([p,s])=>{
-        const r=document.createElement('div'); r.className='ob-row';
-        r.innerHTML=`<span style="color:${col}">${p.toFixed(3)}</span><span style="color:var(--gray-400)">${s.toFixed(1)}</span>`;
-        el.appendChild(r);
-      });
-    };
-    render('obUpBids',d.order_book_up?.bids,'var(--green)');
-    render('obDnAsks',d.order_book_down?.asks,'var(--red)');
-  } catch(e) { toast('Orderbook: '+e.message); }
+  const d = await safeApi('/market/'+mktId, {}, 'Orderbook laden');
+  if (!d) return;
+  show('obSection');
+  st('obLabel',label);
+  const maxL=Math.max(d.liquidity_up||0,d.liquidity_down||0,1);
+  $('liqUpFill').style.width=Math.min(100,(d.liquidity_up/maxL)*100)+'%';
+  $('liqDnFill').style.width=Math.min(100,(d.liquidity_down/maxL)*100)+'%';
+  st('liqUpVal','$'+(d.liquidity_up||0).toFixed(0));
+  st('liqDnVal','$'+(d.liquidity_down||0).toFixed(0));
+  const render=(elId,levels,col)=>{
+    const el=$(elId); if(!el) return; el.innerHTML='';
+    (levels||[]).slice(0,5).forEach(([p,s])=>{
+      const r=document.createElement('div'); r.className='ob-row';
+      r.innerHTML=`<span style="color:${col}">${p.toFixed(3)}</span><span style="color:var(--gray-400)">${s.toFixed(1)}</span>`;
+      el.appendChild(r);
+    });
+  };
+  render('obUpBids',d.order_book_up?.bids,'var(--green)');
+  render('obDnAsks',d.order_book_down?.asks,'var(--red)');
 }
 
 // ── CHART TAB ─────────────────────────────────────────────────────
@@ -1447,13 +1627,7 @@ function setChartTab(t) {
   if (!isCompare) redraw();
 }
 
-// ── SIMULATION — Live Timing ────────────────────────────────────
-// Key insight: the backend computes all 300 ticks upfront.
-// We replay them at REAL TIME (1 tick/second) because each tick = 1 real second.
-// Live prices from WS continuously update the market display.
-// The speed slider only controls BACKTEST replay of historical/closed markets.
-// Active live markets always replay at 1×.
-
+// ── SIMULATION ───────────────────────────────────────────────────
 async function startSim() {
   if (simRunning || !selectedIds.size || !activeStrategy) return;
   liveFocusMarketId = null;
@@ -1463,8 +1637,45 @@ async function startSim() {
   $('btnStart').disabled=true;
   status('Running','status-running');
 
+  const orderedMarketIds = queueItems
+    .map(m => m.id)
+    .filter(id => selectedIds.has(id));
+  const marketIdsForRun = orderedMarketIds.length ? orderedMarketIds : [...selectedIds];
+
+  // Prime live cache from currently visible market cards before simulation starts.
+  marketIdsForRun.forEach(mid => {
+    const m = getMarketById(mid);
+    if (!m) return;
+    if (typeof m.up_price === 'number' && typeof m.down_price === 'number') {
+      _priceCache[mid] = {
+        up: m.up_price,
+        dn: m.down_price,
+        ts: Date.now(),
+      };
+    }
+  });
+
+  await safeApi('/track', { method: 'POST', body: JSON.stringify({ market_ids: marketIdsForRun }) }, 'Track märkte');
+  const freshLive = await safeApi('/prices?market_ids=' + encodeURIComponent(marketIdsForRun.join(',')), {}, 'Startpreise laden');
+  if (freshLive?.prices) {
+    Object.entries(freshLive.prices).forEach(([mid, v]) => {
+      if (typeof v?.up_price === 'number' && typeof v?.down_price === 'number') {
+        updateLivePrice(mid, v.up_price, v.down_price);
+      }
+    });
+  }
+
+  // Final source of truth for initial replay frame: what the user sees on the right panel.
+  marketIdsForRun.forEach(mid => {
+    const m = getMarketById(mid);
+    if (!m) return;
+    if (typeof m.up_price === 'number' && typeof m.down_price === 'number') {
+      updateLivePrice(mid, m.up_price, m.down_price);
+    }
+  });
+
   const req={
-    market_ids:      [...selectedIds],
+    market_ids:      marketIdsForRun,
     strategy_id:     activeStrategy.id,
     strategy_params: strategyParams,
     initial_capital: cfg.cap,
@@ -1475,22 +1686,19 @@ async function startSim() {
   };
   lastSimReq=req;
 
-  let backendResult;
-  try {
-    backendResult=await api('/simulate',{method:'POST',body:JSON.stringify(req)});
-    lastSimResult=backendResult;
-  } catch(e) {
-    toast('Fehler: '+e.message);
-    st('mktStatus','✗ '+e.message);
+  const backendResult = await safeApi('/simulate', {method:'POST',body:JSON.stringify(req)}, 'Simulation');
+  if (!backendResult) {
     $('btnStart').disabled=!selectedIds.size;
     status('Error','status-error');
+    st('mktStatus','✗ Simulation fehlgeschlagen');
     return;
   }
 
+  lastSimResult=backendResult;
   $('expCsv').disabled=false; $('expJson').disabled=false;
 
   simQueue=backendResult.markets.map(m=>({
-    market:m, trades:m.trades, prices:m.price_curve, equity:m.equity_curve,
+    market:{...m, id: m.market_id}, trades:m.trades, prices:m.price_curve, equity:m.equity_curve,
   }));
 
   initState(); updateStats();
@@ -1498,15 +1706,36 @@ async function startSim() {
   simRunning=true;
   $('btnStop').disabled=false;
   status('Running','status-running');
+  autoAdvance = $('cAutoAdv').checked;
+  autoScanNewMarkets = $('cAutoScan').checked;
   replayNext();
 }
 
+function tryAutoAdvanceOrPause() {
+  if (autoAdvance && simQueue.length) {
+    setTimeout(replayNext, 800);
+  } else {
+    pauseAfterMarket();
+  }
+}
+
+function pauseAfterMarket() {
+  simRunning = false;
+  status('Paused','status-idle');
+  $('btnStart').disabled = false;
+  $('btnStop').disabled = true;
+  toast('Market abgeschlossen. Fortsetzen oder Neustart?', 'info');
+}
+
 function replayNext() {
+  autoAdvance = $('cAutoAdv').checked;
+  if (!simRunning && simQueue.length) {
+    simRunning = true;
+    $('btnStop').disabled = false;
+  }
   if (!simRunning||!simQueue.length) { finishSim(); return; }
   const entry=simQueue.shift();
 
-  // Determine if this is a live (active) market → replay at real 1s/tick
-  // Otherwise use user-selected replay speed for closed/historical markets
   const hasTimeLeft = Number.isFinite(entry.market.seconds_left) && entry.market.seconds_left > 0;
   const isLive = (entry.market.active && !entry.market.closed) || hasTimeLeft;
   const msPerTick = isLive ? 1000 : Math.max(20, Math.round(1000 / historicalReplaySpeed));
@@ -1514,15 +1743,18 @@ function replayNext() {
   if (isLive) {
     st('liveLabel','● LIVE — 1s/tick');
     $('liveLabel').style.color='var(--green)';
+    startLivePricePolling(entry.market.id);
   } else {
     st('liveLabel',`Replay (historisch) — ${historicalReplaySpeed}x`);
     $('liveLabel').style.color='var(--gray-300)';
+    stopLivePricePolling();
   }
 
   currentSim={...entry, tick:0};
   mktsRun++; chartPrices=[]; portHistory=[cfg.cap];
+  setDebugLogForMarket(entry.market);
+  appendDebugLine({ tick: 0, source: 'system', message: `Replay gestartet: ${(entry.market.question||'').slice(0,80)}` });
 
-  // Pre-index trades
   const byExit={}, byEntry={};
   (entry.trades||[]).forEach(t=>{
     const ek=t.exit_tick??299;
@@ -1530,8 +1762,6 @@ function replayNext() {
     (byEntry[t.entry_tick]=byEntry[t.entry_tick]||[]).push(t);
   });
 
-  // For live markets: sync to real market time
-  // seconds_left tells us where in the 300s window we currently are
   let startTick=0;
   if (isLive && entry.market.seconds_left!=null) {
     startTick=Math.max(0, 300-entry.market.seconds_left);
@@ -1544,19 +1774,40 @@ function replayNext() {
     const prices=entry.prices||[];
     if (tick>=prices.length) {
       clearInterval(simInterval);
+      stopLivePricePolling();
       Object.keys(openPos).forEach(k=>delete openPos[k]);
       portHistory.push(portfolio);
-      setTimeout(replayNext,300);
+      appendDebugLine({ tick: 300, source: 'system', message: 'Markt abgeschlossen' });
+      tryAutoAdvanceOrPause();
       return;
     }
 
     const p=prices[tick];
-
-    // For live markets, try to use WS-updated live price if available
-    let upPrice=p.up_price, dnPrice=p.dn_price;
+    let upPrice, dnPrice;
+    const cached=_priceCache?.[entry.market.id];
+    const listed = getMarketById(entry.market.id);
+    const hasListed = listed && typeof listed.up_price === 'number' && typeof listed.down_price === 'number';
+    
+    // For active live markets: ignore price_curve, use live prices only.
+    // For closed/historical markets: use price_curve with live override if available.
     if (isLive) {
-      const cached=_priceCache?.[entry.market.id];
-      if (cached) { upPrice=cached.up; dnPrice=cached.dn; }
+      // For live markets, prefer visible card price; fall back to cache; never use stale price_curve.
+      if (hasListed) {
+        upPrice = listed.up_price;
+        dnPrice = listed.down_price;
+        _priceCache[entry.market.id] = { up: upPrice, dn: dnPrice, ts: Date.now() };
+      } else if (cached) {
+        upPrice = cached.up;
+        dnPrice = cached.dn;
+      } else {
+        // Last resort: use price_curve (should not happen if markets are being tracked).
+        upPrice = p.up_price;
+        dnPrice = p.dn_price;
+      }
+    } else {
+      // Closed/historical market: use price_curve.
+      upPrice = p.up_price;
+      dnPrice = p.dn_price;
     }
 
     const eq=entry.equity[tick]??portfolio;
@@ -1574,8 +1825,11 @@ function replayNext() {
     chartPrices.push(upPrice);
     portHistory.push(eq);
 
-    // Ticker update
     st('tMkt',(entry.market.question||'').slice(0,18));
+    const marketClosed = entry.market.closed || (entry.market.active===false && tick>=280);
+    if (marketClosed) {
+      st('tMkt', (entry.market.question||'').slice(0,18) + ' [DONE]');
+    }
     st('tTime',tick+'s');
     st('tUp',upPrice.toFixed(3));
     st('tDn',dnPrice.toFixed(3));
@@ -1586,71 +1840,80 @@ function replayNext() {
     $('progBar').style.width=pct+'%';
     $('progBar').className=pct>80?'warn':'';
 
-    // Signal evaluation
-    if (tick%3===0) evalAndShowSignal(upPrice, dnPrice, tick);
+    // Signal: echtes Backend-Signal alle 3s holen
+    if (entry.market.id) scheduleSignalRefresh(entry.market.id, tick);
+    flushDebugUntilTick(tick);
 
     renderPositions();
     updateStats();
+    updateQueuePricesFromCache();
     redraw();
     currentSim.tick++;
   }, msPerTick);
 }
 
-// Keep a JS-side price cache mirror for live updates.
+// Keep a JS-side price cache mirror
 const _priceCache={};
-
-function evalAndShowSignal(up, dn, t) {
-  const p=strategyParams;
-  const entry=p.entry_max_price??p.base_entry_price??0.28;
-  const dev=p.min_deviation??0.16;
-  const et=p.max_entry_sec??150;
-  const sb=$('signalBadge');
-  if (t>et||t>=268) {
-    sb.style.display='block'; sb.className='signal-badge skip';
-    st('sbTitle','○ SKIP'); st('sbReason',`Zeitfenster geschlossen (t=${t}s)`);
-  } else if (dn<=entry && Math.abs(0.5-dn)>=dev) {
-    sb.style.display='block'; sb.className='signal-badge buy';
-    st('sbTitle',`● BUY DOWN @ ${dn.toFixed(3)}`);
-    st('sbReason',`UP übertrieben (${up.toFixed(3)}) — Δ=${(0.5-dn).toFixed(3)}`);
-  } else if (up<=entry && Math.abs(0.5-up)>=dev) {
-    sb.style.display='block'; sb.className='signal-badge buy';
-    st('sbTitle',`● BUY UP @ ${up.toFixed(3)}`);
-    st('sbReason',`DN übertrieben (${dn.toFixed(3)}) — Δ=${(0.5-up).toFixed(3)}`);
-  } else {
-    sb.style.display='block'; sb.className='signal-badge hold';
-    st('sbTitle','○ HOLD');
-    st('sbReason',`UP=${up.toFixed(3)} DN=${dn.toFixed(3)}`);
-  }
-}
 
 function stopSim() {
   simRunning=false; clearInterval(simInterval);
+  stopLivePricePolling();
   $('btnStart').disabled=!selectedIds.size;
   $('btnStop').disabled=true;
   status('Stopped','status-idle');
 }
 function finishSim() {
   simRunning=false; clearInterval(simInterval);
+  stopLivePricePolling();
   $('btnStart').disabled=!selectedIds.size;
   $('btnStop').disabled=true;
   status('Done ✓','status-live');
   updateStats(); redraw();
-  toast('Simulation abgeschlossen',true);
+  toast('Simulation abgeschlossen','info');
 }
+
+function updateQueuePricesFromCache() {
+  // Update queue item prices from live cache during simulation
+  queueItems.forEach(qi => {
+    const cached = _priceCache?.[qi.id];
+    if (cached && typeof cached.up === 'number' && typeof cached.dn === 'number') {
+      qi.up_price = cached.up;
+      qi.down_price = cached.dn;
+    }
+  });
+  // Re-render queue to show updated prices
+  renderQueue();
+}
+
+// ── AUTO MARKET SCAN ───────────────────────────────────────────
+let lastAutoScanTime = 0;
+async function autoScanMarkets() {
+  autoScanNewMarkets = $('cAutoScan')?.checked;
+  if (!autoScanNewMarkets || simRunning) return;
+  const now = Date.now();
+  if (now - lastAutoScanTime < 15000) return;
+  lastAutoScanTime = now;
+  await loadBtc5min(true);
+}
+setInterval(autoScanMarkets, 5000);
 
 // ── COMPARE ────────────────────────────────────────────────────────
 async function runCompare() {
-  if (!selectedIds.size) { toast('Erst Märkte zur Queue hinzufügen'); return; }
+  if (!selectedIds.size) { toast('Erst Märkte zur Queue hinzufügen','warn'); return; }
   $('cmpTable').innerHTML='<div class="empty-state">Berechne alle Strategien…</div>';
-  try {
-    const req={
+  const d = await safeApi('/compare', {
+    method:'POST',
+    body:JSON.stringify({
       market_ids:[...selectedIds],
       strategy_ids:strategies.map(s=>s.id),
       initial_capital:cfg.cap, stake_per_trade:cfg.stake, max_open:cfg.maxO,
-    };
-    const d=await api('/compare',{method:'POST',body:JSON.stringify(req)});
-    renderCompareTable(d.results||[]);
-  } catch(e) { $('cmpTable').innerHTML=`<div class="empty-state" style="color:var(--red)">${e.message}</div>`; }
+    })
+  }, 'Strategie-Vergleich');
+  if (!d) {
+    $('cmpTable').innerHTML='<div class="empty-state" style="color:var(--red)">Vergleich fehlgeschlagen</div>';
+    return;
+  }
+  renderCompareTable(d.results||[]);
 }
 
 function renderCompareTable(results) {
@@ -1685,13 +1948,14 @@ async function exportSim(fmt) {
   try {
     const r=await fetch(API+'/export/'+fmt,{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(lastSimReq)});
+    if (!r.ok) throw new Error(r.statusText);
     const blob=await r.blob();
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);
     a.download=`polysnipe_${Date.now()}.${fmt}`;
     a.click();
-    toast('Export heruntergeladen',true);
-  } catch(e) { toast('Export: '+e.message); }
+    toast('Export heruntergeladen','info');
+  } catch(e) { toast('Export: '+e.message,'error'); }
 }
 
 function triggerImportJson() {
@@ -1711,9 +1975,9 @@ async function importSimJson(ev) {
       throw new Error('Ungültiges PolySnipe-JSON (markets fehlt)');
     }
     replayImportedResult(data);
-    toast('JSON geladen', true);
+    toast('JSON geladen','info');
   } catch (e) {
-    toast('JSON-Import: '+(e.message||e));
+    toast('JSON-Import: '+(e.message||e),'error');
   }
 }
 
@@ -1724,7 +1988,7 @@ function replayImportedResult(result) {
   initState();
   $('tradeLog').innerHTML='<div class="empty-state">Simulation starten</div>';
   simQueue = (result.markets || []).map(m => ({
-    market: m,
+    market: {...m, id: m.market_id},
     trades: m.trades || [],
     prices: m.price_curve || [],
     equity: m.equity_curve || [],
@@ -1746,16 +2010,15 @@ async function refreshTrackedPrices() {
     liveFocusMarketId,
   ].filter(Boolean))];
   if (!ids.length) return;
-  try {
-    const d = await api('/prices?market_ids='+encodeURIComponent(ids.join(',')));
-    const prices = d?.prices || {};
-    Object.entries(prices).forEach(([mid, v])=>{
-      if (typeof v?.up_price === 'number' && typeof v?.down_price === 'number') {
-        updateLivePrice(mid, v.up_price, v.down_price);
-      }
-    });
-    if (d?.btc) updateBtcBar(d.btc);
-  } catch {}
+  const d = await safeApi('/prices?market_ids='+encodeURIComponent(ids.join(',')), {}, 'Preise aktualisieren');
+  if (!d) return;
+  const prices = d?.prices || {};
+  Object.entries(prices).forEach(([mid, v])=>{
+    if (typeof v?.up_price === 'number' && typeof v?.down_price === 'number') {
+      updateLivePrice(mid, v.up_price, v.down_price);
+    }
+  });
+  if (d?.btc) updateBtcBar(d.btc);
 }
 
 // ── STATS ──────────────────────────────────────────────────────────
@@ -1806,6 +2069,9 @@ function renderPositions() {
       <div class="pos-row"><span class="l">Jetzt</span>
         <span style="color:${col};font-family:'JetBrains Mono',monospace">${cur.toFixed(3)} (${pct>=0?'+':''}${pct.toFixed(1)}%)</span>
       </div>
+      <div class="pos-row"><span class="l">TP / SL</span>
+        <span style="font-family:'JetBrains Mono',monospace;color:var(--gray-400)">${(pos.tp??'—')} / ${(pos.sl??'—')}</span>
+      </div>
       <div class="pos-row"><span class="l">Slippage</span>
         <span style="font-family:'JetBrains Mono',monospace;color:var(--gray-400)">${(pos.slippage||0).toFixed(5)}</span>
       </div>
@@ -1846,6 +2112,7 @@ function openModal(t) {
     ['Entry-Tick',   t.entry_tick+'s'],
     ['Entry @',      t.entry_price?.toFixed(4)],
     ['Ausgeführt @', `${t.exec_price?.toFixed(4)} <span style="color:var(--gray-300);font-size:11px">(slip: +${(t.slippage||0).toFixed(5)})</span>`],
+    ['TP / SL',      `${t.tp ?? '—'} / ${t.sl ?? '—'}`],
     ['Exit-Tick',    (t.exit_tick??'—')+'s'],
     ['Exit @',       t.exit_price?.toFixed(4)??'—'],
     ['Stake',        '\$'+t.stake?.toFixed(2)],
@@ -1882,11 +2149,8 @@ function redraw() {
   const ty=v=>p.t+(1-(v-mn)/(mx-mn))*cH;
 
   ctx.clearRect(0,0,W,canvas.height);
-
-  // Background
   ctx.fillStyle='#f8f9fc'; ctx.fillRect(0,0,W,canvas.height);
 
-  // Grid
   [.25,.5,.75].forEach(f=>{
     const y=p.t+f*cH, v=mn+(1-f)*(mx-mn);
     ctx.strokeStyle='#e4e7f0'; ctx.lineWidth=1;
@@ -1895,7 +2159,6 @@ function redraw() {
     ctx.fillText(isPort?'$'+v.toFixed(2):v.toFixed(2), p.l-4, y+3);
   });
 
-  // 0.5 reference
   if(!isPort){
     const y=ty(.5);
     ctx.strokeStyle='#d0d5e8'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
@@ -1905,7 +2168,6 @@ function redraw() {
     ctx.fillText('0.50', p.l-4, y+3);
   }
 
-  // Entry limit line
   const et=strategyParams.max_entry_sec??strategyParams.max_entry_time??150;
   if(!isPort&&et<299){
     const x=tx(Math.min(et,data.length-1));
@@ -1916,7 +2178,6 @@ function redraw() {
     ctx.fillText('entry limit', x, p.t+8);
   }
 
-  // Area fill
   const grad=ctx.createLinearGradient(0,p.t,0,p.t+cH);
   grad.addColorStop(0, col+'30');
   grad.addColorStop(1, col+'04');
@@ -1926,14 +2187,12 @@ function redraw() {
   ctx.lineTo(tx(data.length-1),p.t+cH); ctx.lineTo(tx(0),p.t+cH);
   ctx.closePath(); ctx.fill();
 
-  // Line
   ctx.strokeStyle=col; ctx.lineWidth=2;
   ctx.lineJoin='round'; ctx.lineCap='round';
   ctx.beginPath();
   data.forEach((v,i)=>i===0?ctx.moveTo(tx(i),ty(v)):ctx.lineTo(tx(i),ty(v)));
   ctx.stroke();
 
-  // Entry markers (open positions)
   if(!isPort){
     Object.values(openPos).forEach(pos=>{
       const idx=Math.min(pos.entry_tick||0,data.length-1);
@@ -1945,13 +2204,10 @@ function redraw() {
     });
   }
 
-  // Time axis labels
   ctx.fillStyle='#9ba3bf'; ctx.font='9px Inter,sans-serif'; ctx.textAlign='center';
   [0,60,120,180,240,300].forEach(sec=>{
     const idx=Math.min(sec, data.length-1);
-    if(idx<data.length){
-      ctx.fillText(sec+'s', tx(idx), p.t+cH+14);
-    }
+    if(idx<data.length){ ctx.fillText(sec+'s', tx(idx), p.t+cH+14); }
   });
 }
 
@@ -1960,9 +2216,11 @@ window.addEventListener('resize', redraw);
 function resetAll() {
   stopSim();
   selectedIds.clear(); queueItems=[];
-  liveFocusMarketId=null;
-  liveFocusMarketQuestion='';
+  liveFocusMarketId=null; liveFocusMarketQuestion='';
   lastSimResult=null; lastSimReq=null;
+  _signalMarketId=null;
+  debugByTick={};
+  debugTickCursor=-1;
   initState();
   $('tradeLog').innerHTML='<div class="empty-state">Simulation starten</div>';
   $('posList').innerHTML='<div class="empty-state">Keine Positionen</div>';
@@ -1989,6 +2247,7 @@ function resetAll() {
   setInterval(refreshHealth, 10000);
   setInterval(()=>{ if(tab==='btc') loadBtc5min(true); }, 15000);
   setInterval(refreshTrackedPrices, 2000);
+  $('dbgEnable')?.addEventListener('change', rerenderDebugConsole);
   setTimeout(redraw, 100);
 })();
 </script>
