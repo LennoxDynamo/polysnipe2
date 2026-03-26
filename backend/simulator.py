@@ -18,9 +18,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-import strategy_loader
-from context import MarketContext, BtcState
-from market_data import _compute_slippage_price
+from . import strategy_loader
+from .context import MarketContext, BtcState
+from .market_data import _compute_slippage_price
 
 
 # ── Trade / Result models ────────────────────────────────────────
