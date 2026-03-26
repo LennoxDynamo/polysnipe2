@@ -42,20 +42,43 @@ if FRONTEND_DIR.exists():
 _notes:       dict[str, list[dict]] = {}   # market_id → [{tick,text,ts}]
 _price_cache: dict[str, dict]       = {}   # market_id → {up,dn,ts,token_ids,question}
 _ws_clients:  set[WebSocket]        = set()
+_bg_tasks:    list[asyncio.Task]    = []
 
 # ── Lifecycle ────────────────────────────────────────────────────
 
 @app.on_event("startup")
 async def startup():
-    strategy_loader.load_all()
-    asyncio.create_task(btc_feed.start())
-    asyncio.create_task(_price_poll_loop())
-    logger.info("PolySnipe backend v2.1 started")
+    """
+    Startup must return immediately so Railway healthcheck can pass.
+    Background services (BTC feed, price polling) start in the background.
+    """
+    try:
+        strategy_loader.load_all()
+        logger.info(f"Loaded {len(strategy_loader.ids())} strategies")
+    except Exception as e:
+        logger.warning(f"Strategy loading error: {e}")
+    
+    # Start background tasks WITHOUT awaiting them
+    # This allows the HTTP server to start and respond to /api/health immediately
+    _bg_tasks.append(asyncio.create_task(btc_feed.start()))
+    _bg_tasks.append(asyncio.create_task(_price_poll_loop()))
+    logger.info("PolySnipe backend v2.1 started (background tasks initiated)")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    await btc_feed.stop()
+    try:
+        await btc_feed.stop()
+    except Exception as e:
+        logger.warning(f"Shutdown error: {e}")
+    # Cancel background tasks
+    for task in _bg_tasks:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 # ── Background price polling → push to WebSocket clients ─────────
