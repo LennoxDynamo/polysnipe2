@@ -7,7 +7,23 @@ BTC 5-min Polymarket Trading Simulator — Python backend + Web frontend.
 ```bash
 cd polysnipe2/backend
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+python -m uvicorn main:app --reload --port 8000
+```
+
+### Windows/PowerShell Hinweise
+
+Wenn `uvicorn` als Befehl nicht gefunden wird, nutze Modul-Start mit Python:
+
+Aus `backend/`:
+
+```powershell
+python -m uvicorn main:app --reload --port 8000
+```
+
+Aus Repo-Root (`polysnipe2/`):
+
+```powershell
+python -m uvicorn --app-dir backend main:app --reload --port 8000
 ```
 
 Dann `frontend/index.html` im Browser öffnen — oder: http://localhost:8000/app

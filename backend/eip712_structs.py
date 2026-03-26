@@ -1,25 +1,22 @@
-"""
-eip712_structs.py — Compatibility shim for py-clob-client on Windows.
+"""Compatibility shim for py-clob-client on Windows.
 
-py-clob-client imports `eip712_structs` which has no pre-built Windows wheels
-and requires a C compiler. This shim redirects all imports to `poly_eip712_structs`,
-a maintained fork with pre-built wheels for all platforms.
-
-Place this file in the same directory as main.py (i.e. backend/).
-Python's import system will find it before looking for the missing package.
+The upstream `eip712-structs` package typically requires compilation,
+while `poly-eip712-structs` provides Windows wheels. We expose the same
+import surface used by py-clob-client.
 """
 
-try:
-    # Try the original first (works on Linux/Mac with compiler)
-    from eip712_structs import *  # noqa: F401, F403
-    from eip712_structs import (  # noqa: F401
-        EIP712Message, EIP712Struct, Address, Array, Boolean,
-        Bytes, Int, String, Uint, make_domain,
-    )
-except ImportError:
-    # Fall back to the Windows-compatible fork
-    from poly_eip712_structs import *  # noqa: F401, F403
-    from poly_eip712_structs import (  # noqa: F401
-        EIP712Message, EIP712Struct, Address, Array, Boolean,
-        Bytes, Int, String, Uint, make_domain,
-    )
+from poly_eip712_structs import *  # noqa: F401, F403
+from poly_eip712_structs import (  # noqa: F401
+    Address,
+    Array,
+    Boolean,
+    Bytes,
+    EIP712Struct,
+    Int,
+    String,
+    Uint,
+    make_domain,
+)
+
+# Compatibility alias: some libraries refer to EIP712Message.
+EIP712Message = EIP712Struct
