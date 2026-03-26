@@ -72,6 +72,9 @@ class MarketResult:
     market_id:    str
     question:     str
     strategy_id:  str
+    active:       bool = False
+    closed:       bool = False
+    seconds_left: Optional[int] = None
     trades:       list[Trade]  = field(default_factory=list)
     equity_curve: list[float]  = field(default_factory=list)
     price_curve:  list[dict]   = field(default_factory=list)
@@ -90,6 +93,9 @@ class MarketResult:
             "market_id":    self.market_id,
             "question":     self.question,
             "strategy_id":  self.strategy_id,
+            "active":       self.active,
+            "closed":       self.closed,
+            "seconds_left": self.seconds_left,
             "pnl":          round(self.pnl, 5),
             "avg_slippage": self.avg_slippage,
             "trades":       [t.as_dict() for t in self.trades],
@@ -202,7 +208,14 @@ def run_simulation(
         mkt_id   = market.get("id", str(uuid.uuid4()))
         question = market.get("question", "")
 
-        mkt_result  = MarketResult(market_id=mkt_id, question=question, strategy_id=strategy_id)
+        mkt_result  = MarketResult(
+            market_id=mkt_id,
+            question=question,
+            strategy_id=strategy_id,
+            active=bool(market.get("active", False)),
+            closed=bool(market.get("closed", False)),
+            seconds_left=market.get("seconds_left"),
+        )
         open_trades: dict[str, Trade] = {}
         price_window: list[dict] = []
 

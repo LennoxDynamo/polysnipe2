@@ -62,7 +62,8 @@ async def shutdown():
 
 async def _price_poll_loop():
     while True:
-        await asyncio.sleep(5)
+        # Keep WS graph/ticker updates near real-time for active markets.
+        await asyncio.sleep(1)
         try:
             if not _price_cache:
                 continue

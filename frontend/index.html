@@ -302,6 +302,20 @@ input[type=range]::-webkit-slider-thumb:hover {
   display: flex; flex-direction: column; min-height: 0;
   background: var(--gray-50);
 }
+.chart-wrap.drop-target {
+  box-shadow: inset 0 0 0 2px var(--blue);
+  background: var(--blue-50);
+}
+.chart-drop-hint {
+  display: none;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px dashed var(--blue);
+  border-radius: var(--radius-sm);
+  color: var(--blue);
+  font-size: 11px;
+  background: rgba(37, 99, 235, 0.04);
+}
 .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-shrink: 0; }
 .chart-title  { font-size: 11px; font-weight: 500; color: var(--gray-500); }
 
@@ -664,6 +678,15 @@ select:focus { border-color: var(--blue); }
       <input type="checkbox" id="cSlip" checked style="accent-color:var(--blue)">
       Slippage-Modell aktiv
     </label>
+    <div class="param-row" style="margin-top:10px">
+      <div class="param-label">Replay-Speed (historisch) <span class="param-value" id="vReplaySpeed">8x</span></div>
+      <select id="replaySpeed" onchange="updReplaySpeed()" style="width:100%">
+        <option value="1">1x (echtzeit)</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+        <option value="8" selected>8x</option>
+      </select>
+    </div>
   </div>
 
   <!-- Signal box -->
@@ -685,6 +708,10 @@ select:focus { border-color: var(--blue); }
         <button class="btn btn-ghost btn-sm" style="flex:1" id="expCsv" onclick="exportSim('csv')" disabled>⬇ CSV</button>
         <button class="btn btn-ghost btn-sm" style="flex:1" id="expJson" onclick="exportSim('json')" disabled>⬇ JSON</button>
       </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-ghost btn-sm" style="flex:1" onclick="triggerImportJson()">⬆ JSON laden</button>
+      </div>
+      <input type="file" id="importJsonInput" accept="application/json,.json" style="display:none" onchange="importSimJson(event)">
       <button class="btn btn-ghost" onclick="resetAll()" style="color:var(--gray-400)">↺  Reset</button>
     </div>
   </div>
@@ -744,7 +771,11 @@ select:focus { border-color: var(--blue); }
   </div>
 
   <!-- Chart -->
-  <div class="chart-wrap" id="chartWrap">
+  <div class="chart-wrap" id="chartWrap"
+       ondragover="onDragOverChart(event)"
+       ondragleave="onDragLeaveChart()"
+       ondrop="onDropToChart(event)">
+    <div class="chart-drop-hint" id="chartDropHint">Markt hier droppen, um Live-Chart darauf zu fokussieren</div>
     <div class="chart-header">
       <div class="chart-title" id="chartLabel">UP-Preis — aktueller Markt</div>
       <div style="display:flex;gap:8px;align-items:center">
@@ -1010,6 +1041,8 @@ function updateBtcBar(b) {
 }
 
 function updateLivePrice(mktId, up, dn) {
+  _priceCache[mktId] = { up, dn, ts: Date.now() };
+
   // Update in btcMarkets / searchResults arrays
   [btcMarkets, searchResults].forEach(arr => {
     const m=arr.find(x=>x.id===mktId);
@@ -1022,12 +1055,33 @@ function updateLivePrice(mktId, up, dn) {
   // Update DOM chips
   const chip=document.querySelector(`[data-mktid="${mktId}"] .price-up`);
   const chipdm=document.querySelector(`[data-mktid="${mktId}"] .price-dn`);
-  if (chip) { chip.textContent='UP '+(up*100).toFixed(1)+'%'; chip.classList.add('flash'); setTimeout(()=>chip.classList.remove('flash'),400); }
+  if (chip) { chip.textContent='UP '+(up*100).toFixed(1)+'%'; }
   if (chipdm) { chipdm.textContent='DN '+(dn*100).toFixed(1)+'%'; }
 
   // Update ticker if this is active sim market
   if (currentSim && currentSim.market?.id===mktId) {
     st('tUp',up.toFixed(3)); st('tDn',dn.toFixed(3));
+
+    Object.values(openPos).forEach(pos=>{
+      pos.curP = pos.direction==='UP' ? up : dn;
+    });
+
+    if (currentSim.market.active && !currentSim.market.closed && chartPrices.length) {
+      chartPrices[chartPrices.length - 1] = up;
+      renderPositions();
+      redraw();
+    }
+  }
+
+  if (!simRunning && liveFocusMarketId===mktId && chartTab==='price') {
+    chartPrices.push(up);
+    if (chartPrices.length > 300) chartPrices = chartPrices.slice(-300);
+    st('tMkt',(liveFocusMarketQuestion||'').slice(0,18));
+    st('tUp',up.toFixed(3));
+    st('tDn',dn.toFixed(3));
+    st('tSrc','LIVE');
+    $('tSrc').style.color='var(--green)';
+    redraw();
   }
 }
 
@@ -1053,6 +1107,16 @@ let searchTimer=null;
 let chartTab='price';
 let lastSimResult=null, lastSimReq=null;
 let queueItems=[];   // full market objects in queue
+let liveFocusMarketId=null;
+let liveFocusMarketQuestion='';
+let historicalReplaySpeed=8;
+
+function updReplaySpeed() {
+  const sel = $('replaySpeed');
+  historicalReplaySpeed = Math.max(1, parseInt(sel?.value || '8', 10));
+  st('vReplaySpeed', historicalReplaySpeed + 'x');
+}
+updReplaySpeed();
 
 function initState() {
   portfolio=cfg.cap; pnl=0; trades=0; wins=0; losses=0; mktsRun=0; totalSlip=0;
@@ -1061,14 +1125,32 @@ function initState() {
 }
 
 // ── MARKET PANEL ─────────────────────────────────────────────────
-async function loadBtc5min() {
-  $('mktStatus').textContent='Lade BTC 5-min Märkte…';
-  $('mktList').innerHTML='<div class="empty-state">Laden…</div>';
+async function loadBtc5min(silent=false) {
+  if (!silent) {
+    $('mktStatus').textContent='Lade BTC 5-min Märkte…';
+    $('mktList').innerHTML='<div class="empty-state">Laden…</div>';
+  }
   try {
     const d=await api('/markets/btc5min?lookback=10');
-    btcMarkets=d.markets||[];
-    renderMarkets(btcMarkets);
-    $('mktStatus').textContent=`${btcMarkets.length} Märkte · alle 30s aktualisiert`;
+    const fresh=d.markets||[];
+
+    // Preserve freshest live quote if we already have one in cache.
+    fresh.forEach(m=>{
+      const cached=_priceCache[m.id];
+      if (cached) {
+        m.up_price = cached.up;
+        m.down_price = cached.dn;
+        m.price_source = 'clob_live';
+      }
+    });
+
+    btcMarkets=fresh;
+    if (tab==='btc' && silent) {
+      patchVisibleMarketCards(btcMarkets);
+    } else {
+      renderMarkets(btcMarkets);
+    }
+    $('mktStatus').textContent=`${btcMarkets.length} Märkte · alle 15s aktualisiert`;
     $('mktStatus').style.color='var(--gray-400)';
     status('Live','status-live');
     // Track active markets for WS updates
@@ -1079,10 +1161,45 @@ async function loadBtc5min() {
     $('mktStatus').style.color='var(--red)';
     $('mktList').innerHTML=`<div class="empty-state" style="color:var(--red)">
       Backend nicht erreichbar.<br><br>
-      <code style="background:var(--gray-100);padding:2px 6px;border-radius:4px;color:var(--gray-700)">cd backend && uvicorn main:app --reload</code>
+      <code style="background:var(--gray-100);padding:2px 6px;border-radius:4px;color:var(--gray-700)">cd backend; python -m uvicorn main:app --reload</code>
     </div>`;
     status('Offline','status-error');
   }
+}
+
+function patchVisibleMarketCards(list) {
+  const root = $('mktList');
+  if (!root || !root.children.length || root.querySelector('.empty-state')) {
+    renderMarkets(list);
+    return;
+  }
+  const byId = Object.fromEntries(list.map(m=>[m.id,m]));
+  root.querySelectorAll('.market-card[data-mktid]').forEach(card=>{
+    const mid = card.dataset.mktid;
+    const m = byId[mid];
+    if (!m) return;
+    const up = card.querySelector('.price-up');
+    const dn = card.querySelector('.price-dn');
+    const src = card.querySelector('.price-src');
+    const vol = card.querySelector('.price-vol');
+    const liveBadge = card.querySelector('.mc-live, .mc-closed');
+    const fill = card.querySelector('.seconds-fill');
+    if (up) up.textContent = `UP ${(m.up_price*100).toFixed(1)}%`;
+    if (dn) dn.textContent = `DN ${(m.down_price*100).toFixed(1)}%`;
+    if (src) src.textContent = m.price_source==='clob_live' ? 'CLOB' : 'GAMMA';
+    if (vol) vol.textContent = m.volume ? '$'+parseFloat(m.volume).toLocaleString('de-DE',{maximumFractionDigits:0}) : '—';
+    if (liveBadge) {
+      const live = m.active && !m.closed;
+      liveBadge.className = live ? 'mc-live' : 'mc-closed';
+      liveBadge.textContent = live ? '● LIVE' : 'closed';
+      card.classList.toggle('live', live);
+    }
+    if (fill && m.seconds_left != null) {
+      const slPct = Math.max(0, Math.min(100, Math.round(m.seconds_left / 300 * 100)));
+      fill.style.width = slPct + '%';
+      fill.style.background = slPct>50?'var(--blue)':slPct>20?'var(--amber)':'var(--red)';
+    }
+  });
 }
 
 let searchAbort=null;
@@ -1211,6 +1328,8 @@ function renderQueue() {
     // Drag to reorder
     item.addEventListener('dragstart', e => {
       e.dataTransfer.setData('queue_idx', i);
+      e.dataTransfer.setData('market_id', m.id);
+      e.dataTransfer.setData('market_json', JSON.stringify(m));
       item.classList.add('dragging');
     });
     item.addEventListener('dragend', ()=>item.classList.remove('dragging'));
@@ -1247,6 +1366,49 @@ function onDropToQueue(e) {
       toast('Markt zur Queue hinzugefügt',true);
     } catch {}
   }
+}
+
+function getMarketById(mid) {
+  return [...queueItems, ...btcMarkets, ...searchResults].find(m=>m.id===mid) || null;
+}
+
+function focusMarketForChart(market) {
+  if (!market) return;
+  liveFocusMarketId = market.id;
+  liveFocusMarketQuestion = market.question || market.id;
+  setChartTab('price');
+  chartPrices = [];
+  if (typeof market.up_price === 'number') chartPrices.push(market.up_price);
+  st('chartLabel', `UP-Preis — LIVE Fokus: ${(liveFocusMarketQuestion||'').slice(0,48)}`);
+  st('liveLabel', '● LIVE Fokus aktiv');
+  $('liveLabel').style.color='var(--green)';
+  api('/track',{method:'POST',body:JSON.stringify({market_ids:[market.id]})}).catch(()=>{});
+  redraw();
+  toast('Live-Chart Fokus gesetzt', true);
+}
+
+function onDragOverChart(e) {
+  e.preventDefault();
+  $('chartWrap').classList.add('drop-target');
+  show('chartDropHint');
+}
+
+function onDragLeaveChart() {
+  $('chartWrap').classList.remove('drop-target');
+  hide('chartDropHint');
+}
+
+function onDropToChart(e) {
+  e.preventDefault();
+  onDragLeaveChart();
+  const mid = e.dataTransfer.getData('market_id');
+  const raw = e.dataTransfer.getData('market_json');
+  let market = null;
+  if (raw) {
+    try { market = JSON.parse(raw); } catch {}
+  }
+  if (!market && mid) market = getMarketById(mid);
+  if (market) focusMarketForChart(market);
 }
 
 // ── ORDERBOOK ─────────────────────────────────────────────────────
@@ -1294,6 +1456,8 @@ function setChartTab(t) {
 
 async function startSim() {
   if (simRunning || !selectedIds.size || !activeStrategy) return;
+  liveFocusMarketId = null;
+  liveFocusMarketQuestion = '';
   upd();
   st('mktStatus','Berechne Simulation…');
   $('btnStart').disabled=true;
@@ -1342,15 +1506,16 @@ function replayNext() {
   const entry=simQueue.shift();
 
   // Determine if this is a live (active) market → replay at real 1s/tick
-  // Otherwise use a faster replay (8 ticks/s) for closed/historical markets
-  const isLive = entry.market.active && !entry.market.closed;
-  const msPerTick = isLive ? 1000 : 125;   // 1s for live, 8× for historical
+  // Otherwise use user-selected replay speed for closed/historical markets
+  const hasTimeLeft = Number.isFinite(entry.market.seconds_left) && entry.market.seconds_left > 0;
+  const isLive = (entry.market.active && !entry.market.closed) || hasTimeLeft;
+  const msPerTick = isLive ? 1000 : Math.max(20, Math.round(1000 / historicalReplaySpeed));
 
   if (isLive) {
     st('liveLabel','● LIVE — 1s/tick');
     $('liveLabel').style.color='var(--green)';
   } else {
-    st('liveLabel','8× replay');
+    st('liveLabel',`Replay (historisch) — ${historicalReplaySpeed}x`);
     $('liveLabel').style.color='var(--gray-300)';
   }
 
@@ -1431,12 +1596,8 @@ function replayNext() {
   }, msPerTick);
 }
 
-// Keep a JS-side price cache mirror for live updates
+// Keep a JS-side price cache mirror for live updates.
 const _priceCache={};
-function _setCachedPrice(mid, up, dn) { _priceCache[mid]={up,dn}; }
-// Patch updateLivePrice to also fill cache
-const _origUpdateLivePrice=updateLivePrice;
-// (we already update queueItems in updateLivePrice above)
 
 function evalAndShowSignal(up, dn, t) {
   const p=strategyParams;
@@ -1531,6 +1692,70 @@ async function exportSim(fmt) {
     a.click();
     toast('Export heruntergeladen',true);
   } catch(e) { toast('Export: '+e.message); }
+}
+
+function triggerImportJson() {
+  const input = $('importJsonInput');
+  if (!input) return;
+  input.value = '';
+  input.click();
+}
+
+async function importSimJson(ev) {
+  const file = ev?.target?.files?.[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data || !Array.isArray(data.markets)) {
+      throw new Error('Ungültiges PolySnipe-JSON (markets fehlt)');
+    }
+    replayImportedResult(data);
+    toast('JSON geladen', true);
+  } catch (e) {
+    toast('JSON-Import: '+(e.message||e));
+  }
+}
+
+function replayImportedResult(result) {
+  stopSim();
+  lastSimResult = result;
+  lastSimReq = null;
+  initState();
+  $('tradeLog').innerHTML='<div class="empty-state">Simulation starten</div>';
+  simQueue = (result.markets || []).map(m => ({
+    market: m,
+    trades: m.trades || [],
+    prices: m.price_curve || [],
+    equity: m.equity_curve || [],
+  }));
+  $('expCsv').disabled=true;
+  $('expJson').disabled=true;
+  simRunning=true;
+  $('btnStop').disabled=false;
+  status('Running','status-running');
+  replayNext();
+}
+
+async function refreshTrackedPrices() {
+  const ids = [...new Set([
+    ...btcMarkets.map(m=>m.id),
+    ...searchResults.map(m=>m.id),
+    ...queueItems.map(m=>m.id),
+    currentSim?.market?.id,
+    liveFocusMarketId,
+  ].filter(Boolean))];
+  if (!ids.length) return;
+  try {
+    const d = await api('/prices?market_ids='+encodeURIComponent(ids.join(',')));
+    const prices = d?.prices || {};
+    Object.entries(prices).forEach(([mid, v])=>{
+      if (typeof v?.up_price === 'number' && typeof v?.down_price === 'number') {
+        updateLivePrice(mid, v.up_price, v.down_price);
+      }
+    });
+    if (d?.btc) updateBtcBar(d.btc);
+  } catch {}
 }
 
 // ── STATS ──────────────────────────────────────────────────────────
@@ -1735,6 +1960,8 @@ window.addEventListener('resize', redraw);
 function resetAll() {
   stopSim();
   selectedIds.clear(); queueItems=[];
+  liveFocusMarketId=null;
+  liveFocusMarketQuestion='';
   lastSimResult=null; lastSimReq=null;
   initState();
   $('tradeLog').innerHTML='<div class="empty-state">Simulation starten</div>';
@@ -1744,6 +1971,8 @@ function resetAll() {
   $('btnStart').disabled=true;
   $('expCsv').disabled=true; $('expJson').disabled=true;
   $('signalBadge').style.display='none';
+  st('chartLabel','UP-Preis — aktueller Markt');
+  st('liveLabel','');
   ['tMkt','tTime','tUp','tDn'].forEach(i=>st(i,'—'));
   st('tRem','300s'); $('progBar').style.width='0';
   renderQueue(); updateStats();
@@ -1758,7 +1987,8 @@ function resetAll() {
   refreshHealth();
   connectWS();
   setInterval(refreshHealth, 10000);
-  setInterval(()=>{ if(tab==='btc') loadBtc5min(); }, 30000);
+  setInterval(()=>{ if(tab==='btc') loadBtc5min(true); }, 15000);
+  setInterval(refreshTrackedPrices, 2000);
   setTimeout(redraw, 100);
 })();
 </script>
