@@ -16,7 +16,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -202,6 +202,12 @@ async def get_config():
         "google_client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
         "api_version": "2.1.0",
     }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    # Avoid noisy 404s in browser console when no favicon asset is provided.
+    return Response(status_code=204)
 
 
 # ── WebSocket ────────────────────────────────────────────────────
