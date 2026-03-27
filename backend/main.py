@@ -448,7 +448,7 @@ async def guest_login():
         )
     except Exception as e:
         logger.warning(f"Guest login error: {e}")
-        raise HTTPException(500, detail="Guest login failed")
+        raise HTTPException(500, detail=f"Guest login failed: {str(e)}")
 
 
 @app.get("/api/auth/me")

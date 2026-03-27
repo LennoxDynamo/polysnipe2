@@ -734,6 +734,8 @@ const AUTH_TOKEN_KEY = 'polysnipe_auth_token';
 const AUTH_USER_KEY = 'polysnipe_auth_user';
 const GUEST_SETTINGS_KEY = 'polysnipe_guest_settings';
 let googleSignInReady = false;
+let googleClientId = '';
+let googleInitInProgress = false;
 
 function getApiBase() {
   const isLocalHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -810,11 +812,57 @@ async function handleGoogleSignIn(response) {
       closeAuthModal();
       startApp();
     } else {
-      showAuthError('Google authentication failed');
+      const err = await res.json().catch(() => ({ detail: 'Google authentication failed' }));
+      showAuthError(err.detail || 'Google authentication failed');
     }
   } catch (e) {
     console.error('Google sign-in error:', e);
     showAuthError('Error during Google sign-in');
+  }
+}
+
+async function initGoogleSignIn() {
+  if (googleSignInReady) return true;
+  if (googleInitInProgress) return false;
+  googleInitInProgress = true;
+
+  try {
+    if (!googleClientId) {
+      const configRes = await fetch(`${getApiBase()}/config`);
+      const config = await configRes.json();
+      googleClientId = config?.google_client_id || '';
+    }
+
+    if (!googleClientId) {
+      return false;
+    }
+
+    let tries = 0;
+    while ((!window.google || !window.google.accounts || !window.google.accounts.id) && tries < 40) {
+      await new Promise(r => setTimeout(r, 150));
+      tries += 1;
+    }
+
+    if (!window.google?.accounts?.id) {
+      return false;
+    }
+
+    window.google.accounts.id.initialize({
+      client_id: googleClientId,
+      callback: handleGoogleSignIn,
+      auto_select: false
+    });
+    window.google.accounts.id.renderButton(
+      document.getElementById('googleSignInButton'),
+      { theme: 'outline', size: 'large', text: 'signin' }
+    );
+    googleSignInReady = true;
+    return true;
+  } catch (e) {
+    console.error('Google init error:', e);
+    return false;
+  } finally {
+    googleInitInProgress = false;
   }
 }
 
@@ -846,9 +894,16 @@ async function handleGuestLogin() {
   }
 }
 
-function beginGoogleSignIn() {
-  if (!googleSignInReady || !window.google?.accounts?.id) {
-    showAuthError('Google Sign-In is still loading. Please try again in a moment.');
+async function beginGoogleSignIn() {
+  if (!googleSignInReady) {
+    const ok = await initGoogleSignIn();
+    if (!ok) {
+      showAuthError('Google Sign-In unavailable right now. You can still continue as Guest.');
+      return;
+    }
+  }
+  if (!window.google?.accounts?.id) {
+    showAuthError('Google Sign-In is unavailable right now.');
     return;
   }
   window.google.accounts.id.prompt();
@@ -2643,31 +2698,8 @@ async function startApp() {
   // No valid token, show auth modal
   showAuthModal();
   
-  // Initialize Google Sign-In button with client ID from backend config
-  try {
-    const configRes = await fetch(`${getApiBase()}/config`);
-    const config = await configRes.json();
-    const googleClientId = config.google_client_id;
-    
-    if (googleClientId) {
-      setTimeout(() => {
-        window.google?.accounts?.id?.initialize({
-          client_id: googleClientId,
-          callback: handleGoogleSignIn,
-          auto_select: false
-        });
-        googleSignInReady = !!window.google?.accounts?.id;
-        window.google?.accounts?.id?.renderButton(
-          document.getElementById('googleSignInButton'),
-          { theme: 'outline', size: 'large', text: 'signin' }
-        );
-      }, 100);
-    } else {
-      console.warn('Google Client ID not configured');
-    }
-  } catch (e) {
-    console.error('Failed to fetch config:', e);
-  }
+  // Try pre-initializing Google Sign-In, but keep guest path fully usable.
+  initGoogleSignIn();
 })();
 </script>
 </body>

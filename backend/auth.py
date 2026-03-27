@@ -19,16 +19,21 @@ class IdentityType(str, Enum):
 
 
 def get_jwt_secret() -> str:
-    """Retrieve JWT secret from environment; fail fast if missing."""
+    """Retrieve JWT secret from environment; provide fallback when missing."""
     secret = os.getenv("JWT_SECRET")
     if not secret:
-        # Allow local development without extra env setup.
-        # Hosted environments should always provide JWT_SECRET explicitly.
-        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
-            raise RuntimeError(
-                "JWT_SECRET environment variable not set. "
-                "Set it before starting the server."
+        railway_project = os.getenv("RAILWAY_PROJECT_ID")
+        railway_service = os.getenv("RAILWAY_SERVICE_ID", "svc")
+        if railway_project:
+            warnings.warn(
+                "JWT_SECRET is not set on Railway. Using fallback secret derived from project metadata. "
+                "Set JWT_SECRET for production security.",
+                RuntimeWarning,
+                stacklevel=2,
             )
+            return f"railway-fallback-{railway_project}-{railway_service}-change-me"
+
+        # Local fallback for development.
         warnings.warn(
             "JWT_SECRET is not set. Using insecure development fallback secret.",
             RuntimeWarning,
