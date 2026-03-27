@@ -20,23 +20,23 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-try:
+if __package__:
     # Package mode (Railway): uvicorn backend.main:app
     from . import btc_feed
     from . import market_data as md
     from . import strategy_loader
     from . import auth
     from . import user_store
-    from .context import BtcState
+    from .context import MarketContext, BtcState
     from .simulator import run_simulation, run_comparison
-except ImportError:
+else:
     # Script mode (local from backend/): python -m uvicorn main:app
     import btc_feed
     import market_data as md
     import strategy_loader
     import auth
     import user_store
-    from context import BtcState
+    from context import MarketContext, BtcState
     from simulator import run_simulation, run_comparison
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
@@ -360,7 +360,6 @@ async def signal(
     ctx_data = await md.get_full_market_context(market)
     btc = BtcState.snapshot()
     m   = ctx_data["market"]
-    from context import MarketContext
     ctx = MarketContext(
         up_price=m["up_price"], down_price=m["down_price"],
         elapsed_sec=elapsed_sec, market_id=market_id,
