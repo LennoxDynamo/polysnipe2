@@ -635,9 +635,337 @@ select:focus { border-color: var(--blue); }
 .dbg-line:last-child { border-bottom: none; }
 .dbg-meta { color: #93c5fd; margin-right: 6px; }
 .dbg-print .dbg-meta { color: #fbbf24; }
+
+/* ── AUTH MODAL ────────────────────────────────────────────────── */
+#authModal {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+#authModal.active {
+  display: flex;
+}
+.auth-container {
+  background: var(--white);
+  border-radius: var(--radius-lg);
+  padding: 40px;
+  max-width: 420px;
+  width: 90%;
+  box-shadow: var(--shadow-lg);
+}
+.auth-header {
+  margin-bottom: 32px;
+  text-align: center;
+}
+.auth-header h1 {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--gray-900);
+}
+.auth-header p {
+  font-size: 14px;
+  color: var(--gray-500);
+}
+.auth-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.auth-btn {
+  padding: 12px 16px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.auth-btn-google {
+  background: var(--white);
+  border: 1px solid var(--gray-300);
+  color: var(--gray-900);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.auth-btn-google:hover {
+  background: var(--gray-50);
+  border-color: var(--gray-400);
+}
+.auth-btn-guest {
+  background: var(--blue);
+  color: var(--white);
+}
+.auth-btn-guest:hover {
+  background: #1d4ed8;
+}
+.auth-btn-google img {
+  height: 18px;
+}
+.auth-loading {
+  text-align: center;
+  color: var(--gray-500);
+  font-size: 13px;
+  margin-top: 12px;
+}
+.auth-error {
+  background: var(--red-50);
+  color: var(--red);
+  padding: 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
 </style>
+
+<!-- Google Sign-In -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+
+<!-- Auth Utilities -->
+<script>
+const AUTH_TOKEN_KEY = 'polysnipe_auth_token';
+const AUTH_USER_KEY = 'polysnipe_auth_user';
+const GUEST_SETTINGS_KEY = 'polysnipe_guest_settings';
+let googleSignInReady = false;
+
+function getApiBase() {
+  const isLocalHost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  const isFileProtocol = location.protocol === 'file:';
+  return (isLocalHost || isFileProtocol) ? 'http://localhost:8000/api' : '/api';
+}
+
+// Get stored authentication token
+function getAuthToken() {
+  return localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+// Store authentication token
+function setAuthToken(token) {
+  localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+// Clear authentication
+function clearAuth() {
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  localStorage.removeItem(AUTH_USER_KEY);
+}
+
+// Get current user from storage
+function getCurrentUser() {
+  const user = localStorage.getItem(AUTH_USER_KEY);
+  return user ? JSON.parse(user) : null;
+}
+
+// Store current user
+function setCurrentUser(user) {
+  localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+}
+
+// Validate token with backend
+async function validateToken(token) {
+  try {
+    const response = await fetch(`${getApiBase()}/auth/me`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (response.ok) {
+      return await response.json();
+    } else {
+      clearAuth();
+      return null;
+    }
+  } catch (e) {
+    console.error('Token validation error:', e);
+    clearAuth();
+    return null;
+  }
+}
+
+// Google Sign-In handler
+async function handleGoogleSignIn(response) {
+  const idToken = response.credential;
+  try {
+    const res = await fetch(`${getApiBase()}/auth/google-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id_token: idToken })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setAuthToken(data.token);
+      setCurrentUser({
+        user_id: data.user_id,
+        email: data.email,
+        identity_type: data.identity_type
+      });
+      // Load user settings
+      await loadUserSettings();
+      // Dismiss modal and start app
+      closeAuthModal();
+      startApp();
+    } else {
+      showAuthError('Google authentication failed');
+    }
+  } catch (e) {
+    console.error('Google sign-in error:', e);
+    showAuthError('Error during Google sign-in');
+  }
+}
+
+// Guest login handler
+async function handleGuestLogin() {
+  try {
+    const res = await fetch(`${getApiBase()}/auth/guest-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (res.ok) {
+      const data = await res.json();
+      setAuthToken(data.token);
+      setCurrentUser({
+        user_id: data.user_id,
+        email: null,
+        identity_type: data.identity_type
+      });
+      // Dismiss modal and start app
+      closeAuthModal();
+      startApp();
+    } else {
+      const err = await res.json().catch(() => ({ detail: 'Guest login failed' }));
+      showAuthError(err.detail || 'Guest login failed');
+    }
+  } catch (e) {
+    console.error('Guest login error:', e);
+    showAuthError('Error during guest login');
+  }
+}
+
+function beginGoogleSignIn() {
+  if (!googleSignInReady || !window.google?.accounts?.id) {
+    showAuthError('Google Sign-In is still loading. Please try again in a moment.');
+    return;
+  }
+  window.google.accounts.id.prompt();
+}
+
+// Show/hide auth modal
+function showAuthModal() {
+  const modal = document.getElementById('authModal');
+  if (modal) modal.classList.add('active');
+}
+
+function closeAuthModal() {
+  const modal = document.getElementById('authModal');
+  if (modal) modal.classList.remove('active');
+}
+
+function showAuthError(msg) {
+  const errorDiv = document.getElementById('authError');
+  if (errorDiv) {
+    errorDiv.textContent = msg;
+    errorDiv.style.display = 'block';
+    setTimeout(() => { errorDiv.style.display = 'none'; }, 5000);
+  }
+}
+
+// Load user settings from server (authenticated users only)
+async function loadUserSettings() {
+  const user = getCurrentUser();
+  if (user && user.identity_type === 'google') {
+    try {
+      const token = getAuthToken();
+      const res = await fetch(`${getApiBase()}/auth/settings`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Restore settings to localStorage with user-specific key
+        if (data.settings) {
+          localStorage.setItem(`polysnipe_settings_${user.user_id}`, JSON.stringify(data.settings));
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load user settings:', e);
+    }
+  }
+}
+
+// Save user settings (authenticated users to server, guests to localStorage)
+async function saveUserSettings(settings) {
+  const user = getCurrentUser();
+  if (user && user.identity_type === 'google') {
+    // Save server-side for authenticated users
+    try {
+      const token = getAuthToken();
+      await fetch(`${getApiBase()}/auth/settings`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ settings })
+      });
+    } catch (e) {
+      console.error('Failed to save user settings:', e);
+    }
+  } else {
+    // Save client-side for guests
+    localStorage.setItem(GUEST_SETTINGS_KEY, JSON.stringify(settings));
+  }
+}
+
+// Logout
+async function logout() {
+  try {
+    const token = getAuthToken();
+    if (token) {
+      await fetch(`${getApiBase()}/auth/logout`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+    }
+  } catch (e) {
+    console.error('Logout error:', e);
+  } finally {
+    clearAuth();
+    location.reload();
+  }
+}
+</script>
 </head>
 <body>
+
+<!-- Auth Modal -->
+<div id="authModal">
+  <div class="auth-container">
+    <div class="auth-header">
+      <h1>👋 Welcome to PolySnipe</h1>
+      <p>Real-time Polymarket simulator powered by live data</p>
+    </div>
+    <div id="authError" class="auth-error" style="display: none;"></div>
+    <div class="auth-buttons">
+      <button class="auth-btn auth-btn-google" onclick="beginGoogleSignIn()">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+          <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+          <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+          <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+        </svg>
+        Sign in with Google
+      </button>
+      <button class="auth-btn auth-btn-guest" onclick="handleGuestLogin()">
+        Continue as Guest
+      </button>
+    </div>
+    <div id="googleSignInButton" data-onsuccess="handleGoogleSignIn" style="display: none;"></div>
+  </div>
+</div>
 
 <div id="modal" onclick="if(event.target===this)closeModal()">
   <div class="modal-box">
@@ -664,6 +992,8 @@ select:focus { border-color: var(--blue); }
   </div>
 
   <div class="hdr-right">
+    <div id="userBadge" style="font-size:11px;color:var(--gray-600);padding:6px 12px;background:var(--gray-100);border-radius:var(--radius);display:none;align-items:center;gap:8px;"></div>
+    <button id="logoutBtn" onclick="logout()" style="padding:6px 12px;background:var(--gray-100);border:none;border-radius:var(--radius);cursor:pointer;font-size:12px;color:var(--gray-700);display:none;" onmouseover="this.style.background='var(--gray-200)'" onmouseout="this.style.background='var(--gray-100)'">Logout</button>
     <div class="status-badge status-idle" id="statusBadge">Idle</div>
     <div style="font-size:10px;color:var(--gray-300);font-family:'JetBrains Mono',monospace" id="wsStatus">WS: —</div>
   </div>
@@ -921,9 +1251,9 @@ select:focus { border-color: var(--blue); }
 
 <script>
 // ════════════════════════════════════════════════════════════════
-const API = location.hostname==='localhost'||location.hostname==='127.0.0.1'
+const API = location.hostname==='localhost'||location.hostname==='127.0.0.1'||location.protocol==='file:'
   ? 'http://localhost:8000/api' : '/api';
-const WS_URL = location.hostname==='localhost'||location.hostname==='127.0.0.1'
+const WS_URL = location.hostname==='localhost'||location.hostname==='127.0.0.1'||location.protocol==='file:'
   ? 'ws://localhost:8000/ws/prices'
   : `wss://${location.host}/ws/prices`;
 
@@ -2257,7 +2587,8 @@ function resetAll() {
 }
 
 // ── INIT ──────────────────────────────────────────────────────────
-(async()=>{
+// App startup function (after auth)
+async function startApp() {
   await loadStrategies();
   await loadBtc5min();
   refreshHealth();
@@ -2267,6 +2598,76 @@ function resetAll() {
   setInterval(refreshTrackedPrices, 2000);
   $('dbgEnable')?.addEventListener('change', rerenderDebugConsole);
   setTimeout(redraw, 100);
+  
+  // Update user badge
+  const user = getCurrentUser();
+  if (user) {
+    const userBadge = document.getElementById('userBadge');
+    const logoutBtn = document.getElementById('logoutBtn');
+    if (userBadge && logoutBtn) {
+      userBadge.style.display = 'flex';
+      logoutBtn.style.display = 'inline-block';
+      userBadge.innerHTML = user.identity_type === 'google' ? `👤 ${user.email}` : `👥 Guest`;
+    }
+  }
+  
+  // Save settings before page unload
+  window.addEventListener('beforeunload', () => {
+    // Gather current settings (strategy, parameters, etc.)
+    const settings = {
+      strategy: $('selectStrat')?.value || 'mean_reversion',
+      capital: $('sCap')?.value || '10',
+      stake: $('sStake')?.value || '1',
+      maxOpen: $('sMaxO')?.value || '2',
+      autoAdvance: $('autoAdvance')?.checked || false,
+      autoScan: $('autoScan')?.checked || false,
+      debugEnabled: $('dbgEnable')?.checked || false,
+    };
+    saveUserSettings(settings);
+  });
+}
+
+// Auth gate check on init
+(async()=>{
+  // Check if valid token exists
+  const token = getAuthToken();
+  if (token) {
+    const validUser = await validateToken(token);
+    if (validUser) {
+      // Valid token, start app
+      startApp();
+      return;
+    }
+  }
+  
+  // No valid token, show auth modal
+  showAuthModal();
+  
+  // Initialize Google Sign-In button with client ID from backend config
+  try {
+    const configRes = await fetch(`${getApiBase()}/config`);
+    const config = await configRes.json();
+    const googleClientId = config.google_client_id;
+    
+    if (googleClientId) {
+      setTimeout(() => {
+        window.google?.accounts?.id?.initialize({
+          client_id: googleClientId,
+          callback: handleGoogleSignIn,
+          auto_select: false
+        });
+        googleSignInReady = !!window.google?.accounts?.id;
+        window.google?.accounts?.id?.renderButton(
+          document.getElementById('googleSignInButton'),
+          { theme: 'outline', size: 'large', text: 'signin' }
+        );
+      }, 100);
+    } else {
+      console.warn('Google Client ID not configured');
+    }
+  } catch (e) {
+    console.error('Failed to fetch config:', e);
+  }
 })();
 </script>
 </body>

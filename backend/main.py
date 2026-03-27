@@ -9,10 +9,12 @@ import csv
 import io
 import json
 import logging
+import os
 import time
+import uuid
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +25,8 @@ try:
     from . import btc_feed
     from . import market_data as md
     from . import strategy_loader
+    from . import auth
+    from . import user_store
     from .context import BtcState
     from .simulator import run_simulation, run_comparison
 except ImportError:
@@ -30,6 +34,8 @@ except ImportError:
     import btc_feed
     import market_data as md
     import strategy_loader
+    import auth
+    import user_store
     from context import BtcState
     from simulator import run_simulation, run_comparison
 
@@ -140,6 +146,18 @@ async def _price_poll_loop():
 
 # ── Request models ────────────────────────────────────────────────
 
+class GoogleLoginRequest(BaseModel):
+    id_token: str = Field(..., description="Google ID token from frontend")
+
+class AuthResponse(BaseModel):
+    token: str
+    user_id: str
+    identity_type: str
+    email: Optional[str] = None
+
+class SettingsUpdateRequest(BaseModel):
+    settings: dict = Field(default_factory=dict, description="User settings dict to persist")
+
 class SimulateRequest(BaseModel):
     market_ids:      list[str] = Field(..., min_length=1)
     strategy_id:     str       = Field("mean_reversion")
@@ -171,6 +189,18 @@ async def health():
         "strategies": strategy_loader.ids(),
         "btc": BtcState.snapshot(),
         "tracked_markets": len(_price_cache),
+    }
+
+
+@app.get("/api/config")
+async def get_config():
+    """
+    Get frontend configuration (public safe values).
+    Used by frontend to initialize Google Sign-In and other settings.
+    """
+    return {
+        "google_client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+        "api_version": "2.1.0",
     }
 
 
@@ -366,6 +396,145 @@ async def add_note(market_id: str, req: NoteRequest):
 async def clear_notes(market_id: str):
     _notes.pop(market_id, None)
     return {"ok": True}
+
+
+# ── Auth ──────────────────────────────────────────────────────────
+
+@app.post("/api/auth/google-login")
+async def google_login(req: GoogleLoginRequest):
+    """
+    Google Sign-In endpoint.
+    Verify the ID token and issue a JWT.
+    """
+    try:
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        # Verify token from Google
+        payload = auth.verify_google_token(req.id_token, google_client_id)
+        user_id = payload.get("sub")
+        email = payload.get("email")
+        
+        if not user_id or not email:
+            raise HTTPException(400, detail="Invalid Google token: missing sub or email")
+        
+        # Issue JWT for authenticated user
+        token = auth.create_jwt(user_id, auth.IdentityType.GOOGLE, email=email)
+        
+        # Load user's existing settings if any
+        settings = await user_store.load_settings(user_id)
+        
+        return AuthResponse(
+            token=token, user_id=user_id,
+            identity_type=auth.IdentityType.GOOGLE, email=email
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Google login error: {e}")
+        raise HTTPException(401, detail="Google authentication failed")
+
+
+@app.post("/api/auth/guest-login")
+async def guest_login():
+    """
+    Guest login (no account needed).
+    Issue an ephemeral guest JWT that expires in 30 days.
+    """
+    try:
+        guest_id = str(uuid.uuid4())
+        token = auth.create_jwt(guest_id, auth.IdentityType.GUEST)
+        
+        return AuthResponse(
+            token=token, user_id=guest_id,
+            identity_type=auth.IdentityType.GUEST, email=None
+        )
+    except Exception as e:
+        logger.warning(f"Guest login error: {e}")
+        raise HTTPException(500, detail="Guest login failed")
+
+
+@app.get("/api/auth/me")
+async def get_current_user_info(authorization: Optional[str] = Header(None, alias="Authorization")):
+    """
+    Get current authenticated user identity from JWT.
+    Validates token and returns user info.
+    """
+    try:
+        user = auth.get_current_user(authorization)
+        return {
+            "user_id": user["user_id"],
+            "identity_type": user["identity_type"],
+            "email": user.get("email"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Auth validation error: {e}")
+        raise HTTPException(401, detail="Unauthorized")
+
+
+@app.post("/api/auth/logout")
+async def logout(authorization: Optional[str] = Header(None, alias="Authorization")):
+    """
+    Logout endpoint (stateless; client discards token).
+    """
+    try:
+        user = auth.get_current_user(authorization)
+        logger.info(f"User logged out: {user['user_id']}")
+        return {"ok": True, "message": "Logged out successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Logout error: {e}")
+        return {"ok": False}
+
+
+@app.get("/api/auth/settings")
+async def get_user_settings(authorization: Optional[str] = Header(None, alias="Authorization")):
+    """
+    Get authenticated user's settings.
+    Guests should not call this; they use localStorage.
+    """
+    try:
+        user = auth.get_current_user(authorization)
+        if user["identity_type"] == auth.IdentityType.GUEST:
+            # Guests store settings client-side; return empty dict
+            return {"settings": {}}
+        
+        user_id = user["user_id"]
+        settings = await user_store.load_settings(user_id)
+        return {"settings": settings}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Get settings error: {e}")
+        raise HTTPException(401, detail="Unauthorized")
+
+
+@app.post("/api/auth/settings")
+async def save_user_settings(req: SettingsUpdateRequest, authorization: Optional[str] = Header(None, alias="Authorization")):
+    """
+    Save authenticated user's settings server-side.
+    Guests should not call this; they use localStorage.
+    """
+    try:
+        user = auth.get_current_user(authorization)
+        if user["identity_type"] == auth.IdentityType.GUEST:
+            # Guests cannot save server-side; they should use localStorage
+            return {"ok": False, "message": "Guest users save settings client-side"}
+        
+        user_id = user["user_id"]
+        success = await user_store.save_settings(user_id, req.settings)
+        
+        if not success:
+            logger.warning(f"Failed to save settings for user {user_id}")
+            return {"ok": False, "message": "Could not save settings"}
+        
+        return {"ok": True, "message": "Settings saved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Save settings error: {e}")
+        raise HTTPException(401, detail="Unauthorized")
 
 
 # ── Simulate ─────────────────────────────────────────────────────

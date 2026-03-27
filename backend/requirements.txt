@@ -11,3 +11,5 @@ poly-eip712-structs>=0.0.1
 pycryptodome>=3.18.0
 eth-keys>=0.4.0
 eth-utils>=2.2.0
+# Auth dependencies
+PyJWT>=2.8.0
